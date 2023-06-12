@@ -1,28 +1,42 @@
 #![feature(allocator_api)]
 
+mod linear_allocator;
+
+#[macro_use]
+extern crate static_assertions;
+
+use crate::linear_allocator::LinearAllocator;
 use std::{
-    alloc::{AllocError, Allocator},
-    sync::Mutex,
+    alloc::{AllocError, Allocator, Layout},
+    cell::Cell,
+    ptr::NonNull,
 };
 
-// FIXME(neubaner): since a `Vec<T>` data pointer is not stable, it breaks this rule of `Allocator`;
-//   - any pointer to a memory block which is currently allocated may be passed to any other method of the allocator.
-// dumb me :p
-struct Inner {
-    memory: Vec<u8>,
-    free_blocks: Vec<(usize, usize)>,
+type BlockCell<const SIZE: usize> = Cell<Option<NonNull<LinearAllocator<SIZE>>>>;
+
+pub struct FallbackAllocator<const BLOCK_SIZE: usize> {
+    next_free_block: BlockCell<BLOCK_SIZE>,
 }
 
-pub struct ArenaAllocator {
-    inner: Mutex<Inner>,
-}
+unsafe impl<const BLOCK_SIZE: usize> Allocator for FallbackAllocator<BLOCK_SIZE> {
+    fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        match self.next_free_block.get() {
+            None => {
+                let block = Box::try_new(LinearAllocator::<BLOCK_SIZE>::new())?;
 
-unsafe impl Allocator for ArenaAllocator {
-    fn allocate(
-        &self,
-        layout: std::alloc::Layout,
-    ) -> Result<std::ptr::NonNull<[u8]>, std::alloc::AllocError> {
-        let mut lock = self.inner.lock().unwrap();
+                let buf_ptr = block.allocate(layout)?;
+
+                // SAFETY: `Box::into_raw` always returns non-null pointer
+                self.next_free_block.set(Some(unsafe {
+                    NonNull::new_unchecked(Box::into_raw(block))
+                }));
+
+                return Ok(buf_ptr);
+            }
+            Some(_free_block) => Err(AllocError),
+        }
+
+        /* let mut lock = self.inner.lock().unwrap();
 
         let memory_ptr = lock.memory.as_mut_ptr();
         let padding = (layout.align() - (memory_ptr as usize) % layout.align()) % layout.align(); // wtf...
@@ -41,7 +55,7 @@ unsafe impl Allocator for ArenaAllocator {
             let reused_slice =
                 core::ptr::slice_from_raw_parts_mut(unsafe { memory_ptr.add(offset) }, size);
 
-            return Ok(unsafe { std::ptr::NonNull::new_unchecked(reused_slice) });
+            return Ok(unsafe { NonNull::new_unchecked(reused_slice) });
         }
 
         lock.memory
@@ -57,11 +71,11 @@ unsafe impl Allocator for ArenaAllocator {
 
         unsafe { lock.memory.set_len(pre_len + padding + layout.size()) };
 
-        Ok(unsafe { std::ptr::NonNull::new_unchecked(spare_slice) })
+        Ok(unsafe { NonNull::new_unchecked(spare_slice) }) */
     }
 
-    unsafe fn deallocate(&self, ptr: std::ptr::NonNull<u8>, layout: std::alloc::Layout) {
-        let mut lock = self.inner.lock().unwrap();
+    unsafe fn deallocate(&self, _ptr: NonNull<u8>, _layout: Layout) {
+        /* let mut lock = self.inner.lock().unwrap();
 
         let memory_ptr = lock.memory.as_ptr();
         let ptr = ptr.as_ptr();
@@ -69,75 +83,15 @@ unsafe impl Allocator for ArenaAllocator {
         debug_assert!(memory_ptr <= ptr);
 
         lock.free_blocks
-            .push(((ptr.offset_from(memory_ptr) as usize), layout.size()));
+            .push(((ptr.offset_from(memory_ptr) as usize), layout.size())); */
     }
 }
 
-impl ArenaAllocator {
+impl<const BLOCK_SIZE: usize> FallbackAllocator<BLOCK_SIZE> {
     #[inline]
     pub const fn new() -> Self {
         Self {
-            inner: Mutex::new(Inner {
-                memory: Vec::new(),
-                free_blocks: Vec::new(),
-            }),
+            next_free_block: Cell::new(None),
         }
-    }
-
-    #[inline]
-    pub fn with_initial_capacity(capacity: usize) -> Self {
-        Self {
-            inner: Mutex::new(Inner {
-                memory: Vec::with_capacity(capacity),
-                free_blocks: Vec::new(),
-            }),
-        }
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use std::mem;
-
-    use super::ArenaAllocator;
-
-    #[test]
-    fn should_keep_allocation_for_the_lifetime() {
-        let arena_allocator = ArenaAllocator::with_initial_capacity(1024);
-
-        let mut vec1 = Vec::with_capacity_in(32, &arena_allocator);
-        let mut vec2 = Vec::with_capacity_in(32, &arena_allocator);
-        let mut zero_sized_vec = Vec::new_in(&arena_allocator);
-
-        vec1.extend_from_slice(&[1, 2, 3, 4, 5]);
-        vec2.extend_from_slice(&[6, 7, 8, 9, 10]);
-
-        zero_sized_vec.push(());
-        zero_sized_vec.push(());
-        zero_sized_vec.push(());
-
-        assert_eq!(vec1, &[1, 2, 3, 4, 5]);
-        assert_eq!(vec2, &[6, 7, 8, 9, 10]);
-        assert_eq!(zero_sized_vec.len(), 3);
-
-        assert_eq!(
-            arena_allocator.inner.lock().unwrap().memory.len(),
-            64 * mem::size_of::<i32>()
-        );
-    }
-
-    #[test]
-    fn should_reuse_block() {
-        let arena_allocator = ArenaAllocator::with_initial_capacity(1024);
-        let vec1: Vec<i32, _> = Vec::with_capacity_in(512, &arena_allocator);
-
-        drop(vec1);
-        assert_eq!(arena_allocator.inner.lock().unwrap().free_blocks.len(), 1);
-
-        let vec2: Vec<i32, _> = Vec::with_capacity_in(256, &arena_allocator);
-        assert_eq!(arena_allocator.inner.lock().unwrap().free_blocks.len(), 0);
-        drop(vec2);
-
-        assert_eq!(arena_allocator.inner.lock().unwrap().free_blocks.len(), 1);
     }
 }
