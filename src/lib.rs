@@ -2,9 +2,6 @@
 
 mod linear_allocator;
 
-#[macro_use]
-extern crate static_assertions;
-
 use crate::linear_allocator::LinearAllocator;
 use std::{
     alloc::{AllocError, Allocator, Layout},
@@ -31,7 +28,7 @@ unsafe impl<const BLOCK_SIZE: usize> Allocator for FallbackAllocator<BLOCK_SIZE>
                     NonNull::new_unchecked(Box::into_raw(block))
                 }));
 
-                return Ok(buf_ptr);
+                Ok(buf_ptr)
             }
             Some(_free_block) => Err(AllocError),
         }
