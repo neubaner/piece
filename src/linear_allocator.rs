@@ -58,12 +58,15 @@ unsafe impl<const SIZE: usize> Send for LinearAllocator<SIZE> {}
 
 impl<const SIZE: usize> LinearAllocator<SIZE> {
     pub fn new() -> Self {
+        // TODO(gneubaner): Can replace this runtime assertion when generic_const_exprs is stable
+        assert!(SIZE > 0);
+
+        // SAFETY: the assertion above ensures that layout size is greater than zero
         let mem_ptr = unsafe { std::alloc::alloc(Layout::array::<u8>(SIZE).unwrap()) };
         let mem_ptr = NonNull::new(mem_ptr).unwrap();
 
         Self {
-            len: 0.into(),
-            // SAFETY: It's safe to `assume_init` because the slice is a bunch of `MaybeUninit`
+            len: AtomicUsize::new(0),
             buf: mem_ptr,
         }
     }
