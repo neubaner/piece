@@ -2,93 +2,174 @@
 
 mod linear_allocator;
 
-use crate::linear_allocator::LinearAllocator;
 use std::{
     alloc::{AllocError, Allocator, Layout},
     cell::Cell,
+    marker::PhantomData,
     ptr::NonNull,
 };
 
-type BlockCell<const SIZE: usize> = Cell<Option<NonNull<LinearAllocator<SIZE>>>>;
-
-pub struct FallbackAllocator<const BLOCK_SIZE: usize> {
-    next_free_block: BlockCell<BLOCK_SIZE>,
+struct AllocatorNode<A: Allocator> {
+    allocator: A,
+    allocations: Vec<NonNull<u8>>,
+    next_allocator: AllocatorRef<A>,
 }
 
-unsafe impl<const BLOCK_SIZE: usize> Allocator for FallbackAllocator<BLOCK_SIZE> {
+impl<A: Allocator> AllocatorNode<A> {
+    fn new(allocator: A) -> Self {
+        Self {
+            allocator,
+            allocations: Vec::new(),
+            next_allocator: AllocatorRef::new(None),
+        }
+    }
+
+    fn with_next(allocator: A, next: NonNull<AllocatorNode<A>>) -> Self {
+        Self {
+            allocator,
+            allocations: Vec::new(),
+            next_allocator: AllocatorRef::new(Some(next)),
+        }
+    }
+}
+
+type AllocatorRef<A> = Cell<Option<NonNull<AllocatorNode<A>>>>;
+
+pub struct ChainAllocator<A: Allocator> {
+    next_allocator: AllocatorRef<A>,
+    _owns: PhantomData<A>,
+}
+
+impl<A: Allocator> Drop for ChainAllocator<A> {
+    fn drop(&mut self) {
+        while let Some(alloc_node_ptr) = self.next_allocator.get() {
+            // SAFETY: alloc_node_ptr was allocated using `Box` and it's never dereferenced again
+            let alloc_node = unsafe { Box::from_raw(alloc_node_ptr.as_ptr()) };
+            self.next_allocator
+                .set(alloc_node.next_allocator.into_inner());
+        }
+    }
+}
+
+unsafe impl<A> Allocator for ChainAllocator<A>
+where
+    A: Allocator + Default,
+{
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-        match self.next_free_block.get() {
+        match self.next_allocator.get() {
             None => {
-                let block = Box::try_new(LinearAllocator::<BLOCK_SIZE>::new())?;
+                let allocator = A::default();
 
-                let buf_ptr = block.allocate(layout)?;
+                let mut allocator_node = Box::try_new(AllocatorNode::new(allocator))?;
 
+                let buf_ptr = allocator_node.allocator.allocate(layout)?;
+
+                {
+                    // SAFETY:
+                    let ptr = unsafe { buf_ptr.as_ref() }.as_ptr().cast_mut();
+                    allocator_node
+                        .allocations
+                        .push(unsafe { NonNull::new_unchecked(ptr) });
+                }
+
+                let allocator_node_ptr = Box::into_raw(allocator_node);
                 // SAFETY: `Box::into_raw` always returns non-null pointer
-                self.next_free_block.set(Some(unsafe {
-                    NonNull::new_unchecked(Box::into_raw(block))
-                }));
+                self.next_allocator
+                    .set(Some(unsafe { NonNull::new_unchecked(allocator_node_ptr) }));
 
                 Ok(buf_ptr)
             }
-            Some(_free_block) => Err(AllocError),
+            Some(mut next_allocator_node_ptr) => {
+                let next_allocator_node = unsafe { next_allocator_node_ptr.as_mut() };
+                match next_allocator_node.allocator.allocate(layout) {
+                    Ok(buf_ptr) => Ok(buf_ptr),
+                    Err(_) => {
+                        let allocator = A::default();
+
+                        let mut allocator_node = Box::try_new(AllocatorNode::with_next(
+                            allocator,
+                            next_allocator_node_ptr,
+                        ))?;
+
+                        let buf_ptr = allocator_node.allocator.allocate(layout)?;
+
+                        {
+                            let ptr = unsafe { buf_ptr.as_ref().as_ptr().cast_mut() };
+                            allocator_node
+                                .allocations
+                                .push(unsafe { NonNull::new_unchecked(ptr) });
+                        }
+
+                        let allocator_node_ptr = Box::into_raw(allocator_node);
+
+                        // SAFETY: `Box::into_raw` always returns non-null pointer
+                        self.next_allocator
+                            .set(Some(unsafe { NonNull::new_unchecked(allocator_node_ptr) }));
+
+                        Ok(buf_ptr)
+                    }
+                }
+            }
         }
-
-        /* let mut lock = self.inner.lock().unwrap();
-
-        let memory_ptr = lock.memory.as_mut_ptr();
-        let padding = (layout.align() - (memory_ptr as usize) % layout.align()) % layout.align(); // wtf...
-
-        let free_block_index = lock.free_blocks.iter().position(|(_, size)| {
-            let new_size = size - padding;
-            layout.size() <= new_size
-        });
-
-        // TODO(neubaner): split blocks if required size is small
-        if let Some(index) = free_block_index {
-            let (offset, size) = lock.free_blocks.swap_remove(index);
-            let offset = offset + padding;
-            let size = size - padding;
-
-            let reused_slice =
-                core::ptr::slice_from_raw_parts_mut(unsafe { memory_ptr.add(offset) }, size);
-
-            return Ok(unsafe { NonNull::new_unchecked(reused_slice) });
-        }
-
-        lock.memory
-            .try_reserve(padding + layout.size())
-            .map_err(|_| AllocError)?;
-
-        let pre_len = lock.memory.len();
-
-        let spare_slice = core::ptr::slice_from_raw_parts_mut(
-            unsafe { memory_ptr.add(pre_len + padding) },
-            layout.size(),
-        );
-
-        unsafe { lock.memory.set_len(pre_len + padding + layout.size()) };
-
-        Ok(unsafe { NonNull::new_unchecked(spare_slice) }) */
     }
 
-    unsafe fn deallocate(&self, _ptr: NonNull<u8>, _layout: Layout) {
-        /* let mut lock = self.inner.lock().unwrap();
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+        let mut next_allocator = self.next_allocator.get();
 
-        let memory_ptr = lock.memory.as_ptr();
-        let ptr = ptr.as_ptr();
+        while let Some(mut alloc_node_ptr) = next_allocator {
+            // SAFETY: guaranteed to not have an alias in single thread
+            let alloc_node = unsafe { alloc_node_ptr.as_mut() };
 
-        debug_assert!(memory_ptr <= ptr);
+            if alloc_node.allocations.contains(&ptr) {
+                alloc_node.allocator.deallocate(ptr, layout);
+                break;
+            }
 
-        lock.free_blocks
-            .push(((ptr.offset_from(memory_ptr) as usize), layout.size())); */
+            next_allocator = alloc_node.next_allocator.get();
+        }
     }
 }
 
-impl<const BLOCK_SIZE: usize> FallbackAllocator<BLOCK_SIZE> {
+impl<A: Allocator> ChainAllocator<A> {
     #[inline]
     pub const fn new() -> Self {
         Self {
-            next_free_block: Cell::new(None),
+            next_allocator: AllocatorRef::new(None),
+            _owns: PhantomData,
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::mem::size_of;
+
+    use crate::linear_allocator::LinearAllocator;
+
+    use super::*;
+
+    #[test]
+    fn should_create_multiple_allocators() {
+        let linear_allocator = ChainAllocator::<LinearAllocator<{ 32 * size_of::<i32>() }>>::new();
+
+        let mut vec1 = Vec::with_capacity_in(32, &linear_allocator);
+        let mut vec2 = Vec::with_capacity_in(32, &linear_allocator);
+
+        vec1.extend_from_slice(&[1, 2, 3, 4, 5]);
+        vec2.extend_from_slice(&[6, 7, 8, 9, 10]);
+
+        assert_eq!(vec1, &[1, 2, 3, 4, 5]);
+        assert_eq!(vec2, &[6, 7, 8, 9, 10]);
+    }
+
+    #[test]
+    fn should_reuse_block() {
+        let linear_allocator = ChainAllocator::<LinearAllocator<{ 512 * size_of::<i32>() }>>::new();
+        let vec1: Vec<i32, _> = Vec::with_capacity_in(512, &linear_allocator);
+
+        drop(vec1);
+
+        let vec2: Vec<i32, _> = Vec::with_capacity_in(512, &linear_allocator);
+        drop(vec2);
     }
 }

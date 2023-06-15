@@ -19,7 +19,8 @@ unsafe impl<const SIZE: usize> Allocator for LinearAllocator<SIZE> {
             let padding = (layout.align() - ((self.buf.as_ptr() as usize + len) % layout.align()))
                 % layout.align();
 
-            let new_len = len + padding + layout.size();
+            let start_offset = len + padding;
+            let new_len = start_offset + layout.size();
 
             if SIZE < new_len {
                 return Err(AllocError);
@@ -33,14 +34,15 @@ unsafe impl<const SIZE: usize> Allocator for LinearAllocator<SIZE> {
                 continue;
             };
 
-            let buf_ptr = unsafe { self.buf.as_ptr().add(new_len) };
+            // SAFETY: indexing inside the already allocated buffer
+            let buf_ptr = unsafe { self.buf.as_ptr().add(start_offset) };
 
-            break Ok(
-                // SAFETY: buf_ptr points to a slice reference, it can't be null
-                unsafe {
-                    NonNull::slice_from_raw_parts(NonNull::new_unchecked(buf_ptr), layout.size())
-                },
-            );
+            // SAFETY: buf_ptr points to a slice reference, it can't be null
+            let slice_ptr = unsafe {
+                NonNull::slice_from_raw_parts(NonNull::new_unchecked(buf_ptr), layout.size())
+            };
+
+            break Ok(slice_ptr);
         }
     }
 
@@ -69,6 +71,12 @@ impl<const SIZE: usize> LinearAllocator<SIZE> {
             len: AtomicUsize::new(0),
             buf: mem_ptr,
         }
+    }
+}
+
+impl<const SIZE: usize> Default for LinearAllocator<SIZE> {
+    fn default() -> Self {
+        LinearAllocator::<SIZE>::new()
     }
 }
 
