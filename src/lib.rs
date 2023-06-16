@@ -9,7 +9,7 @@ use std::{
     ptr::NonNull,
 };
 
-struct AllocatorNode<A: Allocator> {
+struct AllocatorNode<A> {
     allocator: A,
     allocations: Vec<NonNull<u8>>,
     next_allocator: AllocatorRef<A>,
@@ -35,12 +35,12 @@ impl<A: Allocator> AllocatorNode<A> {
 
 type AllocatorRef<A> = Cell<Option<NonNull<AllocatorNode<A>>>>;
 
-pub struct ChainAllocator<A: Allocator> {
+pub struct ChainAllocator<A> {
     next_allocator: AllocatorRef<A>,
     _owns: PhantomData<A>,
 }
 
-impl<A: Allocator> Drop for ChainAllocator<A> {
+impl<A> Drop for ChainAllocator<A> {
     fn drop(&mut self) {
         while let Some(alloc_node_ptr) = self.next_allocator.get() {
             // SAFETY: alloc_node_ptr was allocated using `Box` and it's never dereferenced again
@@ -59,25 +59,9 @@ where
         match self.next_allocator.get() {
             None => {
                 let allocator = A::default();
+                let allocator_node = Box::try_new(AllocatorNode::new(allocator))?;
 
-                let mut allocator_node = Box::try_new(AllocatorNode::new(allocator))?;
-
-                let buf_ptr = allocator_node.allocator.allocate(layout)?;
-
-                {
-                    // SAFETY:
-                    let ptr = unsafe { buf_ptr.as_ref() }.as_ptr().cast_mut();
-                    allocator_node
-                        .allocations
-                        .push(unsafe { NonNull::new_unchecked(ptr) });
-                }
-
-                let allocator_node_ptr = Box::into_raw(allocator_node);
-                // SAFETY: `Box::into_raw` always returns non-null pointer
-                self.next_allocator
-                    .set(Some(unsafe { NonNull::new_unchecked(allocator_node_ptr) }));
-
-                Ok(buf_ptr)
+                self.allocate_and_track_node(allocator_node, layout)
             }
             Some(mut next_allocator_node_ptr) => {
                 let next_allocator_node = unsafe { next_allocator_node_ptr.as_mut() };
@@ -86,27 +70,12 @@ where
                     Err(_) => {
                         let allocator = A::default();
 
-                        let mut allocator_node = Box::try_new(AllocatorNode::with_next(
+                        let allocator_node = Box::try_new(AllocatorNode::with_next(
                             allocator,
                             next_allocator_node_ptr,
                         ))?;
 
-                        let buf_ptr = allocator_node.allocator.allocate(layout)?;
-
-                        {
-                            let ptr = unsafe { buf_ptr.as_ref().as_ptr().cast_mut() };
-                            allocator_node
-                                .allocations
-                                .push(unsafe { NonNull::new_unchecked(ptr) });
-                        }
-
-                        let allocator_node_ptr = Box::into_raw(allocator_node);
-
-                        // SAFETY: `Box::into_raw` always returns non-null pointer
-                        self.next_allocator
-                            .set(Some(unsafe { NonNull::new_unchecked(allocator_node_ptr) }));
-
-                        Ok(buf_ptr)
+                        self.allocate_and_track_node(allocator_node, layout)
                     }
                 }
             }
@@ -130,13 +99,41 @@ where
     }
 }
 
-impl<A: Allocator> ChainAllocator<A> {
+impl<A> ChainAllocator<A> {
     #[inline]
     pub const fn new() -> Self {
         Self {
             next_allocator: AllocatorRef::new(None),
             _owns: PhantomData,
         }
+    }
+}
+
+impl<A: Allocator> ChainAllocator<A> {
+    fn allocate_and_track_node(
+        &self,
+        mut allocator_node: Box<AllocatorNode<A>>,
+        layout: Layout,
+    ) -> Result<NonNull<[u8]>, AllocError>
+    where
+        A: Allocator,
+    {
+        let buf_ptr = allocator_node.allocator.allocate(layout)?;
+
+        {
+            // SAFETY:
+            let ptr = unsafe { buf_ptr.as_ref() }.as_ptr().cast_mut();
+            allocator_node
+                .allocations
+                .push(unsafe { NonNull::new_unchecked(ptr) });
+        }
+
+        let allocator_node_ptr = Box::into_raw(allocator_node);
+        // SAFETY: `Box::into_raw` always returns non-null pointer
+        self.next_allocator
+            .set(Some(unsafe { NonNull::new_unchecked(allocator_node_ptr) }));
+
+        Ok(buf_ptr)
     }
 }
 
