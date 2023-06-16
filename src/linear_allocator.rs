@@ -42,7 +42,7 @@ unsafe impl<const SIZE: usize> Allocator for LinearAllocator<SIZE> {
                 NonNull::slice_from_raw_parts(NonNull::new_unchecked(buf_ptr), layout.size())
             };
 
-            break Ok(slice_ptr);
+            return Ok(slice_ptr);
         }
     }
 
@@ -51,7 +51,9 @@ unsafe impl<const SIZE: usize> Allocator for LinearAllocator<SIZE> {
 
 impl<const SIZE: usize> Drop for LinearAllocator<SIZE> {
     fn drop(&mut self) {
-        unsafe { std::alloc::dealloc(self.buf.as_ptr(), Layout::array::<u8>(SIZE).unwrap()) };
+        unsafe {
+            std::alloc::dealloc(self.buf.as_ptr(), Layout::array::<u8>(SIZE).unwrap());
+        }
     }
 }
 
@@ -76,7 +78,7 @@ impl<const SIZE: usize> LinearAllocator<SIZE> {
 
 impl<const SIZE: usize> Default for LinearAllocator<SIZE> {
     fn default() -> Self {
-        LinearAllocator::<SIZE>::new()
+        Self::new()
     }
 }
 
@@ -136,7 +138,7 @@ mod test {
             for i in 1..10000 {
                 s.spawn(move || {
                     let mut vec: Vec<i32, _> = Vec::with_capacity_in(1024, linear_allocator);
-                    let slice: Vec<i32> = (i..i + 1024).into_iter().collect();
+                    let slice: Vec<i32> = (i..i + 1024).collect();
                     vec.extend(slice.iter());
 
                     assert_eq!(vec, slice);

@@ -1,4 +1,5 @@
 #![feature(allocator_api)]
+#![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 
 mod linear_allocator;
 
@@ -16,7 +17,7 @@ struct AllocatorNode<A> {
 }
 
 impl<A: Allocator> AllocatorNode<A> {
-    fn new(allocator: A) -> Self {
+    const fn new(allocator: A) -> Self {
         Self {
             allocator,
             allocations: Vec::new(),
@@ -24,7 +25,7 @@ impl<A: Allocator> AllocatorNode<A> {
         }
     }
 
-    fn with_next(allocator: A, next: NonNull<AllocatorNode<A>>) -> Self {
+    const fn with_next(allocator: A, next: NonNull<Self>) -> Self {
         Self {
             allocator,
             allocations: Vec::new(),
@@ -55,6 +56,7 @@ unsafe impl<A> Allocator for ChainAllocator<A>
 where
     A: Allocator + Default,
 {
+    #[inline]
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         match self.next_allocator.get() {
             None => {
@@ -65,23 +67,22 @@ where
             }
             Some(mut next_allocator_node_ptr) => {
                 let next_allocator_node = unsafe { next_allocator_node_ptr.as_mut() };
-                match next_allocator_node.allocator.allocate(layout) {
-                    Ok(buf_ptr) => Ok(buf_ptr),
-                    Err(_) => {
-                        let allocator = A::default();
 
-                        let allocator_node = Box::try_new(AllocatorNode::with_next(
-                            allocator,
-                            next_allocator_node_ptr,
-                        ))?;
+                if let Ok(buf_ptr) = next_allocator_node.allocator.allocate(layout) {
+                    Ok(buf_ptr)
+                } else {
+                    let allocator = A::default();
 
-                        self.allocate_and_track_node(allocator_node, layout)
-                    }
+                    let allocator_node =
+                        Box::try_new(AllocatorNode::with_next(allocator, next_allocator_node_ptr))?;
+
+                    self.allocate_and_track_node(allocator_node, layout)
                 }
             }
         }
     }
 
+    #[inline]
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
         let mut next_allocator = self.next_allocator.get();
 
@@ -101,6 +102,7 @@ where
 
 impl<A> ChainAllocator<A> {
     #[inline]
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             next_allocator: AllocatorRef::new(None),
@@ -126,7 +128,7 @@ impl<A: Allocator> ChainAllocator<A> {
             allocator_node
                 .allocations
                 .push(unsafe { NonNull::new_unchecked(ptr) });
-        }
+        };
 
         let allocator_node_ptr = Box::into_raw(allocator_node);
         // SAFETY: `Box::into_raw` always returns non-null pointer
