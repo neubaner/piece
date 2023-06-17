@@ -51,6 +51,7 @@ unsafe impl<const SIZE: usize> Allocator for LinearAllocator<SIZE> {
 
 impl<const SIZE: usize> Drop for LinearAllocator<SIZE> {
     fn drop(&mut self) {
+        // SAFETY: buf pointer was allocated with std::alloc::alloc with the same layout
         unsafe {
             std::alloc::dealloc(self.buf.as_ptr(), Layout::array::<u8>(SIZE).unwrap());
         }

@@ -1,5 +1,10 @@
 #![feature(allocator_api)]
-#![warn(clippy::all, clippy::pedantic, clippy::nursery)]
+#![warn(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::std_instead_of_core
+)]
 
 mod linear_allocator;
 
@@ -12,7 +17,6 @@ use std::{
 
 struct AllocatorNode<A> {
     allocator: A,
-    allocations: Vec<NonNull<u8>>,
     next_allocator: AllocatorRef<A>,
 }
 
@@ -20,7 +24,6 @@ impl<A: Allocator> AllocatorNode<A> {
     const fn new(allocator: A) -> Self {
         Self {
             allocator,
-            allocations: Vec::new(),
             next_allocator: AllocatorRef::new(None),
         }
     }
@@ -28,7 +31,6 @@ impl<A: Allocator> AllocatorNode<A> {
     const fn with_next(allocator: A, next: NonNull<Self>) -> Self {
         Self {
             allocator,
-            allocations: Vec::new(),
             next_allocator: AllocatorRef::new(Some(next)),
         }
     }
@@ -65,8 +67,9 @@ where
 
                 self.allocate_and_track_node(allocator_node, layout)
             }
-            Some(mut next_allocator_node_ptr) => {
-                let next_allocator_node = unsafe { next_allocator_node_ptr.as_mut() };
+            Some(next_allocator_node_ptr) => {
+                // SAFETY: Should be safe because ChainAllocator is not `Sync` and `Send`
+                let next_allocator_node = unsafe { next_allocator_node_ptr.as_ref() };
 
                 if let Ok(buf_ptr) = next_allocator_node.allocator.allocate(layout) {
                     Ok(buf_ptr)
@@ -84,19 +87,62 @@ where
 
     #[inline]
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
-        let mut next_allocator = self.next_allocator.get();
+        let (header_layout, buf_offset) =
+            Layout::new::<AllocationHeader<A>>().extend(layout).unwrap();
 
-        while let Some(mut alloc_node_ptr) = next_allocator {
-            // SAFETY: guaranteed to not have an alias in single thread
-            let alloc_node = unsafe { alloc_node_ptr.as_mut() };
+        let header_ptr = ptr.as_ptr().sub(buf_offset).cast();
+        let header: AllocationHeader<A> = core::ptr::read(header_ptr);
 
-            if alloc_node.allocations.contains(&ptr) {
-                alloc_node.allocator.deallocate(ptr, layout);
-                break;
-            }
+        header
+            .allocator_node
+            .as_ref()
+            .allocator
+            .deallocate(NonNull::new_unchecked(header_ptr.cast()), header_layout);
+    }
+}
 
-            next_allocator = alloc_node.next_allocator.get();
-        }
+#[repr(transparent)]
+struct AllocationHeader<A> {
+    allocator_node: NonNull<AllocatorNode<A>>,
+}
+
+impl<A: Allocator> ChainAllocator<A> {
+    fn allocate_and_track_node(
+        &self,
+        allocator_node: Box<AllocatorNode<A>>,
+        layout: Layout,
+    ) -> Result<NonNull<[u8]>, AllocError>
+    where
+        A: Allocator,
+    {
+        let (header_layout, buf_offset) =
+            Layout::new::<AllocationHeader<A>>().extend(layout).unwrap();
+
+        let buf_ptr = allocator_node
+            .allocator
+            .allocate(header_layout)?
+            .cast::<u8>();
+
+        let allocator_node_ptr = NonNull::from(Box::leak(allocator_node));
+
+        // SAFETY: buf_ptr is valid because allocation succeeded
+        unsafe {
+            core::ptr::write(
+                buf_ptr.cast().as_ptr(),
+                AllocationHeader::<A> {
+                    allocator_node: allocator_node_ptr,
+                },
+            );
+        };
+
+        self.next_allocator.set(Some(allocator_node_ptr));
+
+        Ok({
+            // SAFETY: buf_ptr + buf_offset is in bounds and non-null
+            let ptr = unsafe { NonNull::new_unchecked(buf_ptr.as_ptr().add(buf_offset)) };
+
+            NonNull::slice_from_raw_parts(ptr, layout.size())
+        })
     }
 }
 
@@ -111,34 +157,6 @@ impl<A> ChainAllocator<A> {
     }
 }
 
-impl<A: Allocator> ChainAllocator<A> {
-    fn allocate_and_track_node(
-        &self,
-        mut allocator_node: Box<AllocatorNode<A>>,
-        layout: Layout,
-    ) -> Result<NonNull<[u8]>, AllocError>
-    where
-        A: Allocator,
-    {
-        let buf_ptr = allocator_node.allocator.allocate(layout)?;
-
-        {
-            // SAFETY:
-            let ptr = unsafe { buf_ptr.as_ref() }.as_ptr().cast_mut();
-            allocator_node
-                .allocations
-                .push(unsafe { NonNull::new_unchecked(ptr) });
-        };
-
-        let allocator_node_ptr = Box::into_raw(allocator_node);
-        // SAFETY: `Box::into_raw` always returns non-null pointer
-        self.next_allocator
-            .set(Some(unsafe { NonNull::new_unchecked(allocator_node_ptr) }));
-
-        Ok(buf_ptr)
-    }
-}
-
 #[cfg(test)]
 mod test {
     use std::mem::size_of;
@@ -149,7 +167,7 @@ mod test {
 
     #[test]
     fn should_create_multiple_allocators() {
-        let linear_allocator = ChainAllocator::<LinearAllocator<{ 32 * size_of::<i32>() }>>::new();
+        let linear_allocator = ChainAllocator::<LinearAllocator<{ 64 * size_of::<i32>() }>>::new();
 
         let mut vec1 = Vec::with_capacity_in(32, &linear_allocator);
         let mut vec2 = Vec::with_capacity_in(32, &linear_allocator);
@@ -163,7 +181,8 @@ mod test {
 
     #[test]
     fn should_reuse_block() {
-        let linear_allocator = ChainAllocator::<LinearAllocator<{ 512 * size_of::<i32>() }>>::new();
+        let linear_allocator =
+            ChainAllocator::<LinearAllocator<{ 1024 * size_of::<i32>() }>>::new();
         let vec1: Vec<i32, _> = Vec::with_capacity_in(512, &linear_allocator);
 
         drop(vec1);
