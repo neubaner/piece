@@ -24,6 +24,25 @@ impl<A: Allocator> AllocatorNode<A> {
             next_allocator: AllocatorRef::new(Some(next)),
         }
     }
+
+    fn allocate_and_track(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        let (layout_with_footer, footer_offset) =
+            layout.extend(Layout::new::<AllocationFooter<A>>()).unwrap();
+
+        let buf_ptr = self.allocator.allocate(layout_with_footer)?.cast::<u8>();
+
+        // SAFETY: buf_ptr is valid because allocation succeeded
+        unsafe {
+            core::ptr::write(
+                buf_ptr.as_ptr().add(footer_offset).cast(),
+                AllocationFooter::<A> {
+                    allocator_node: NonNull::from(self),
+                },
+            );
+        };
+
+        Ok(NonNull::slice_from_raw_parts(buf_ptr, layout.size()))
+    }
 }
 
 type AllocatorRef<A> = Cell<Option<NonNull<AllocatorNode<A>>>>;
@@ -57,7 +76,7 @@ where
         match self.next_allocator.get() {
             None => {
                 let allocator = A::default();
-                let allocator_node = Box::try_new(AllocatorNode::new(allocator))?;
+                let allocator_node = AllocatorNode::new(allocator);
 
                 self.allocate_and_track_node(allocator_node, layout)
             }
@@ -65,13 +84,13 @@ where
                 // SAFETY: Should be safe because ChainAllocator is not `Sync` and `Send`
                 let next_allocator_node = unsafe { next_allocator_node_ptr.as_ref() };
 
-                if let Ok(buf_ptr) = next_allocator_node.allocator.allocate(layout) {
+                if let Ok(buf_ptr) = next_allocator_node.allocate_and_track(layout) {
                     Ok(buf_ptr)
                 } else {
                     let allocator = A::default();
 
                     let allocator_node =
-                        Box::try_new(AllocatorNode::with_next(allocator, next_allocator_node_ptr))?;
+                        AllocatorNode::with_next(allocator, next_allocator_node_ptr);
 
                     self.allocate_and_track_node(allocator_node, layout)
                 }
@@ -103,35 +122,18 @@ struct AllocationFooter<A> {
 impl<A: Allocator> ChainAllocator<A> {
     fn allocate_and_track_node(
         &self,
-        allocator_node: Box<AllocatorNode<A>>,
+        allocator_node: AllocatorNode<A>,
         layout: Layout,
     ) -> Result<NonNull<[u8]>, AllocError>
     where
         A: Allocator,
     {
-        let (layout_with_footer, footer_offset) =
-            layout.extend(Layout::new::<AllocationFooter<A>>()).unwrap();
-
-        let buf_ptr = allocator_node
-            .allocator
-            .allocate(layout_with_footer)?
-            .cast::<u8>();
-
-        let allocator_node_ptr = NonNull::from(Box::leak(allocator_node));
-
-        // SAFETY: buf_ptr is valid because allocation succeeded
-        unsafe {
-            core::ptr::write(
-                buf_ptr.as_ptr().add(footer_offset).cast(),
-                AllocationFooter::<A> {
-                    allocator_node: allocator_node_ptr,
-                },
-            );
-        };
+        let allocation = allocator_node.allocate_and_track(layout)?;
+        let allocator_node_ptr = NonNull::from(Box::leak(Box::try_new(allocator_node)?));
 
         self.next_allocator.set(Some(allocator_node_ptr));
 
-        Ok(NonNull::slice_from_raw_parts(buf_ptr, layout.size()))
+        Ok(allocation)
     }
 }
 
@@ -183,6 +185,24 @@ mod test {
         assert_eq!(vec1, &[1, 2, 3, 4, 5]);
         assert_eq!(vec2, &[6, 7, 8, 9, 10]);
         assert_eq!(2, chain_allocator.allocators_count());
+    }
+
+    #[test]
+    fn should_reuse_the_same_allocator() {
+        // NOTE(gneubaner): each allocation has a pointer to the allocator used
+        let chain_allocator = ChainAllocator::<
+            LinearAllocator<{ 1024 * size_of::<i32>() + size_of::<*const ()>() }>,
+        >::new();
+
+        let mut vec1 = Vec::with_capacity_in(32, &chain_allocator);
+        let mut vec2 = Vec::with_capacity_in(32, &chain_allocator);
+
+        vec1.extend_from_slice(&[1, 2, 3, 4, 5]);
+        vec2.extend_from_slice(&[6, 7, 8, 9, 10]);
+
+        assert_eq!(vec1, &[1, 2, 3, 4, 5]);
+        assert_eq!(vec2, &[6, 7, 8, 9, 10]);
+        assert_eq!(1, chain_allocator.allocators_count());
     }
 
     #[test]
