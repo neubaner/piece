@@ -8,20 +8,29 @@ use std::{
 struct AllocatorNode<A> {
     allocator: A,
     next_allocator: AllocatorRef<A>,
+    _owns: PhantomData<AllocatorNode<A>>,
 }
 
 impl<A: Allocator> AllocatorNode<A> {
-    const fn new(allocator: A) -> Self {
+    fn new() -> Self
+    where
+        A: Default,
+    {
         Self {
-            allocator,
+            allocator: A::default(),
             next_allocator: AllocatorRef::new(None),
+            _owns: PhantomData,
         }
     }
 
-    const fn with_next(allocator: A, next: NonNull<Self>) -> Self {
+    fn with_next(next: NonNull<Self>) -> Self
+    where
+        A: Default,
+    {
         Self {
-            allocator,
+            allocator: A::default(),
             next_allocator: AllocatorRef::new(Some(next)),
+            _owns: PhantomData,
         }
     }
 
@@ -49,7 +58,7 @@ type AllocatorRef<A> = Cell<Option<NonNull<AllocatorNode<A>>>>;
 
 pub struct ChainAllocator<A> {
     next_allocator: AllocatorRef<A>,
-    _owns: PhantomData<A>,
+    _owns: PhantomData<AllocatorNode<A>>,
 }
 
 // SAFETY: It's safe to send them across threads because there's no way to get a references to
@@ -61,8 +70,7 @@ impl<A> Drop for ChainAllocator<A> {
         while let Some(alloc_node_ptr) = self.next_allocator.get() {
             // SAFETY: alloc_node_ptr was allocated using `Box` and it's never dereferenced again
             let alloc_node = unsafe { Box::from_raw(alloc_node_ptr.as_ptr()) };
-            self.next_allocator
-                .set(alloc_node.next_allocator.into_inner());
+            self.next_allocator.set(alloc_node.next_allocator.get());
         }
     }
 }
@@ -73,10 +81,16 @@ where
 {
     #[inline]
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        // No need to track zero size allocators(like Global), they are already free to create and
+        // all instances should be the same
+        if std::mem::size_of::<A>() == 0 {
+            let zero_sized_allocator = A::default();
+            return zero_sized_allocator.allocate(layout);
+        }
+
         match self.next_allocator.get() {
             None => {
-                let allocator = A::default();
-                let allocator_node = AllocatorNode::new(allocator);
+                let allocator_node = AllocatorNode::new();
 
                 self.allocate_and_track_node(allocator_node, layout)
             }
@@ -87,10 +101,7 @@ where
                 if let Ok(buf_ptr) = next_allocator_node.allocate_and_track(layout) {
                     Ok(buf_ptr)
                 } else {
-                    let allocator = A::default();
-
-                    let allocator_node =
-                        AllocatorNode::with_next(allocator, next_allocator_node_ptr);
+                    let allocator_node = AllocatorNode::with_next(next_allocator_node_ptr);
 
                     self.allocate_and_track_node(allocator_node, layout)
                 }
@@ -100,13 +111,21 @@ where
 
     #[inline]
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+        // No need to track zero size allocators(like Global), they are already free to create and
+        // all instances should be the same
+
+        if std::mem::size_of::<A>() == 0 {
+            let zero_sized_allocator = A::default();
+            return zero_sized_allocator.deallocate(ptr, layout);
+        }
+
         let (layout_with_footer, footer_offset) =
             layout.extend(Layout::new::<AllocationFooter<A>>()).unwrap();
 
-        let footer_ptr = ptr.as_ptr().sub(footer_offset).cast();
-        let footer: AllocationFooter<A> = core::ptr::read(footer_ptr);
+        let footer_ptr: *mut AllocationFooter<A> = ptr.as_ptr().add(footer_offset).cast();
 
-        footer
+        NonNull::new_unchecked(footer_ptr)
+            .as_ref()
             .allocator_node
             .as_ref()
             .allocator
@@ -128,10 +147,11 @@ impl<A: Allocator> ChainAllocator<A> {
     where
         A: Allocator,
     {
+        let allocator_node = Box::try_new(allocator_node)?;
         let allocation = allocator_node.allocate_and_track(layout)?;
-        let allocator_node_ptr = NonNull::from(Box::leak(Box::try_new(allocator_node)?));
 
-        self.next_allocator.set(Some(allocator_node_ptr));
+        self.next_allocator
+            .set(Some(NonNull::from(Box::leak(allocator_node))));
 
         Ok(allocation)
     }
@@ -152,7 +172,7 @@ impl<A> ChainAllocator<A> {
 
         let mut count = 0;
         while let Some(alloc_node_ptr) = next_allocator {
-            // SAFETY: it's not possible to get a reference of an allocation node outside the
+            // SAFETY: it's not possible to get a reference to an allocation node outside the
             // crate
             next_allocator = unsafe { alloc_node_ptr.as_ref() }.next_allocator.get();
             count += 1;
@@ -163,7 +183,7 @@ impl<A> ChainAllocator<A> {
 
 #[cfg(test)]
 mod test {
-    use std::mem::size_of;
+    use std::{alloc::Global, mem::size_of, sync::Mutex};
 
     use crate::linear_allocator::LinearAllocator;
 
@@ -189,10 +209,7 @@ mod test {
 
     #[test]
     fn should_reuse_the_same_allocator() {
-        // NOTE(gneubaner): each allocation has a pointer to the allocator used
-        let chain_allocator = ChainAllocator::<
-            LinearAllocator<{ 1024 * size_of::<i32>() + size_of::<*const ()>() }>,
-        >::new();
+        let chain_allocator = ChainAllocator::<LinearAllocator<{ 1024 * size_of::<i32>() }>>::new();
 
         let mut vec1 = Vec::with_capacity_in(32, &chain_allocator);
         let mut vec2 = Vec::with_capacity_in(32, &chain_allocator);
@@ -202,6 +219,53 @@ mod test {
 
         assert_eq!(vec1, &[1, 2, 3, 4, 5]);
         assert_eq!(vec2, &[6, 7, 8, 9, 10]);
+        assert_eq!(1, chain_allocator.allocators_count());
+    }
+
+    #[test]
+    fn should_track_every_allocation() {
+        struct StubAllocator {
+            vec: Mutex<Vec<NonNull<u8>>>,
+        }
+
+        unsafe impl Allocator for StubAllocator {
+            fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+                let global = Global;
+                let allocation = global.allocate(layout)?;
+
+                self.vec.lock().unwrap().push(allocation.cast());
+
+                Ok(allocation)
+            }
+
+            unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+                let global = Global;
+
+                assert!(self.vec.lock().unwrap().contains(&ptr));
+
+                global.deallocate(ptr, layout);
+            }
+        }
+
+        impl Default for StubAllocator {
+            fn default() -> Self {
+                Self {
+                    vec: Mutex::new(Vec::new()),
+                }
+            }
+        }
+
+        let chain_allocator = ChainAllocator::<StubAllocator>::new();
+
+        let mut vec1: Vec<i32, _> = Vec::with_capacity_in(32, &chain_allocator);
+        let mut vec2: Vec<i32, _> = Vec::with_capacity_in(32, &chain_allocator);
+
+        vec1.extend_from_slice(&[1, 2, 3, 4, 5]);
+        vec2.extend_from_slice(&[6, 7, 8, 9, 10]);
+
+        assert_eq!(vec1, &[1, 2, 3, 4, 5]);
+        assert_eq!(vec2, &[6, 7, 8, 9, 10]);
+
         assert_eq!(1, chain_allocator.allocators_count());
     }
 
