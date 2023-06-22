@@ -56,6 +56,43 @@ impl<A: Allocator> AllocatorNode<A> {
 
 type AllocatorRef<A> = Cell<Option<NonNull<AllocatorNode<A>>>>;
 
+/// A [`ChainAllocator<A>`] create a new allocator of type `A` when the existing allocators of this
+/// type are exausted.
+/// This is useful when used with a [`crate::linear_allocator::LinearAllocator`] for example. When
+/// all of its memory is used, the [`ChainAllocator<A>`] will create a new one. This is useful when
+/// you want to use fixed-sized allocators but you're worried that your program will run out of
+/// memory.
+///
+/// There's some overhead when using the [`ChainAllocator<A>`]. Currently, every allocation has an
+/// extra pointer that refers to the allocator, to make deallocation possible.
+///
+/// Usage:
+/// ```
+/// #![feature(allocator_api)]
+///
+/// use std::vec::Vec;
+/// use std::mem::size_of;
+/// use piece::linear_allocator::LinearAllocator;
+/// use piece::chain_allocator::ChainAllocator;
+///
+/// // Make room for an extra pointer
+/// type MyAllocator = LinearAllocator<{ 32 * size_of::<i32>() + size_of::<*const ()>() }>;
+///
+/// let chain_allocator = ChainAllocator::<MyAllocator>::new();
+///
+/// // Create two vectors that fills the whole `LinearAllocator`
+/// // Each `Vec` makes a single allocation
+/// let mut vec1 = Vec::with_capacity_in(32, &chain_allocator);
+/// let mut vec2 = Vec::with_capacity_in(32, &chain_allocator);
+///
+/// vec1.extend_from_slice(&[1, 2, 3, 4, 5]);
+/// vec2.extend_from_slice(&[6, 7, 8, 9, 10]);
+///
+/// assert_eq!(vec1, &[1, 2, 3, 4, 5]);
+/// assert_eq!(vec2, &[6, 7, 8, 9, 10]);
+///
+/// assert_eq!(2, chain_allocator.allocator_count());
+/// ```
 pub struct ChainAllocator<A> {
     next_allocator: AllocatorRef<A>,
     _owns: PhantomData<AllocatorNode<A>>,
@@ -158,6 +195,7 @@ impl<A: Allocator> ChainAllocator<A> {
 }
 
 impl<A> ChainAllocator<A> {
+    /// Creates a empty [`ChainAllocator<A>`].
     #[inline]
     #[must_use]
     pub const fn new() -> Self {
@@ -167,7 +205,8 @@ impl<A> ChainAllocator<A> {
         }
     }
 
-    pub fn allocators_count(&self) -> usize {
+    /// Returns the number of allocators created by this [`ChainAllocator<A>`].
+    pub fn allocator_count(&self) -> usize {
         let mut next_allocator = self.next_allocator.get();
 
         let mut count = 0;
@@ -204,7 +243,7 @@ mod test {
 
         assert_eq!(vec1, &[1, 2, 3, 4, 5]);
         assert_eq!(vec2, &[6, 7, 8, 9, 10]);
-        assert_eq!(2, chain_allocator.allocators_count());
+        assert_eq!(2, chain_allocator.allocator_count());
     }
 
     #[test]
@@ -219,7 +258,7 @@ mod test {
 
         assert_eq!(vec1, &[1, 2, 3, 4, 5]);
         assert_eq!(vec2, &[6, 7, 8, 9, 10]);
-        assert_eq!(1, chain_allocator.allocators_count());
+        assert_eq!(1, chain_allocator.allocator_count());
     }
 
     #[test]
@@ -266,7 +305,7 @@ mod test {
         assert_eq!(vec1, &[1, 2, 3, 4, 5]);
         assert_eq!(vec2, &[6, 7, 8, 9, 10]);
 
-        assert_eq!(1, chain_allocator.allocators_count());
+        assert_eq!(1, chain_allocator.allocator_count());
     }
 
     #[test]
@@ -279,12 +318,14 @@ mod test {
         let mut vec1 = Vec::with_capacity_in(32, &chain_allocator);
         vec1.extend_from_slice(&[1, 2, 3, 4, 5]);
         assert_eq!(vec1, &[1, 2, 3, 4, 5]);
+        assert_eq!(chain_allocator.allocator_count(), 1);
         drop(vec1);
 
         let handle = std::thread::spawn(move || {
             let mut vec2 = Vec::with_capacity_in(32, &chain_allocator);
             vec2.extend_from_slice(&[6, 7, 8, 9, 10]);
             assert_eq!(vec2, &[6, 7, 8, 9, 10]);
+            assert_eq!(chain_allocator.allocator_count(), 2);
         });
 
         let _ = handle.join();
