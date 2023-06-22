@@ -58,24 +58,27 @@ type AllocatorRef<A> = Cell<Option<NonNull<AllocatorNode<A>>>>;
 
 /// A [`ChainAllocator<A>`] create a new allocator of type `A` when the existing allocators of this
 /// type are exausted.
-/// This is useful when used with a [`crate::linear_allocator::LinearAllocator`] for example. When
-/// all of its memory is used, the [`ChainAllocator<A>`] will create a new one. This is useful when
+///
+/// It can be useful when used with a [`LinearAllocator`] for example. When
+/// all of its memory is used, the [`ChainAllocator`] will create a new one. This is useful when
 /// you want to use fixed-sized allocators but you're worried that your program will run out of
 /// memory.
 ///
-/// There's some overhead when using the [`ChainAllocator<A>`]. Currently, every allocation has an
-/// extra pointer that refers to the allocator, to make deallocation possible.
+/// There's some overhead when using the [`ChainAllocator`]. Currently, every allocation has an
+/// extra pointer that refers to the allocator, to make deallocation possible. Also the allocators
+/// themselves are allocated using the [`Global`] allocator(or whatever allocator [`Box`] uses by
+/// default).
 ///
-/// Usage:
+/// # Usage:
 /// ```
 /// #![feature(allocator_api)]
 ///
 /// use std::vec::Vec;
 /// use std::mem::size_of;
-/// use piece::linear_allocator::LinearAllocator;
-/// use piece::chain_allocator::ChainAllocator;
+/// use piece::LinearAllocator;
+/// use piece::ChainAllocator;
 ///
-/// // Make room for an extra pointer
+/// // Make room for the allocator pointer
 /// type MyAllocator = LinearAllocator<{ 32 * size_of::<i32>() + size_of::<*const ()>() }>;
 ///
 /// let chain_allocator = ChainAllocator::<MyAllocator>::new();
@@ -93,6 +96,9 @@ type AllocatorRef<A> = Cell<Option<NonNull<AllocatorNode<A>>>>;
 ///
 /// assert_eq!(2, chain_allocator.allocator_count());
 /// ```
+///
+/// [`LinearAllocator`]: crate::linear_allocator::LinearAllocator
+/// [`Global`]: std::alloc::Global
 pub struct ChainAllocator<A> {
     next_allocator: AllocatorRef<A>,
     _owns: PhantomData<AllocatorNode<A>>,

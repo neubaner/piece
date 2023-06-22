@@ -6,5 +6,8 @@
     clippy::std_instead_of_core
 )]
 
-pub mod chain_allocator;
-pub mod linear_allocator;
+mod chain_allocator;
+mod linear_allocator;
+
+pub use chain_allocator::ChainAllocator;
+pub use linear_allocator::LinearAllocator;
