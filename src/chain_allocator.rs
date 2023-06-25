@@ -52,6 +52,132 @@ impl<A: Allocator> AllocatorNode<A> {
 
         Ok(NonNull::slice_from_raw_parts(buf_ptr, layout.size()))
     }
+
+    unsafe fn grow_and_track(
+        &self,
+        ptr: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> Result<NonNull<[u8]>, AllocError> {
+        let (old_layout_with_footer, _) = old_layout
+            .extend(Layout::new::<AllocationFooter<A>>())
+            .unwrap();
+
+        let (new_layout_with_footer, footer_offset) = new_layout
+            .extend(Layout::new::<AllocationFooter<A>>())
+            .unwrap();
+
+        let buf_ptr = unsafe {
+            self.allocator
+                .grow(ptr, old_layout_with_footer, new_layout_with_footer)
+        }?
+        .cast::<u8>();
+
+        // SAFETY: buf_ptr is valid because allocation succeeded
+        unsafe {
+            core::ptr::write(
+                buf_ptr.as_ptr().add(footer_offset).cast(),
+                AllocationFooter::<A> {
+                    allocator_node: NonNull::from(self),
+                },
+            );
+        };
+
+        Ok(NonNull::slice_from_raw_parts(buf_ptr, new_layout.size()))
+    }
+
+    unsafe fn grow_zeroed_and_track(
+        &self,
+        ptr: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> Result<NonNull<[u8]>, AllocError> {
+        let (old_layout_with_footer, old_footer_offset) = old_layout
+            .extend(Layout::new::<AllocationFooter<A>>())
+            .unwrap();
+
+        let (new_layout_with_footer, new_footer_offset) = new_layout
+            .extend(Layout::new::<AllocationFooter<A>>())
+            .unwrap();
+
+        let buf_ptr = unsafe {
+            self.allocator
+                .grow_zeroed(ptr, old_layout_with_footer, new_layout_with_footer)
+        }?
+        .cast::<u8>();
+
+        // Zero the previous pointer location
+        // SAFETY: buffer returned should be bigger than the previous one.
+        unsafe {
+            core::ptr::write_bytes(
+                buf_ptr.as_ptr().add(old_footer_offset),
+                0,
+                std::mem::size_of::<AllocationFooter<A>>(),
+            )
+        };
+
+        // SAFETY: buf_ptr is valid because allocation succeeded
+        unsafe {
+            core::ptr::write(
+                buf_ptr.as_ptr().add(new_footer_offset).cast(),
+                AllocationFooter::<A> {
+                    allocator_node: NonNull::from(self),
+                },
+            );
+        };
+
+        Ok(NonNull::slice_from_raw_parts(buf_ptr, new_layout.size()))
+    }
+
+    unsafe fn shrink_and_track(
+        &self,
+        ptr: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> Result<NonNull<[u8]>, AllocError> {
+        let (old_layout_with_footer, _) = old_layout
+            .extend(Layout::new::<AllocationFooter<A>>())
+            .unwrap();
+
+        let (new_layout_with_footer, footer_offset) = new_layout
+            .extend(Layout::new::<AllocationFooter<A>>())
+            .unwrap();
+
+        let buf_ptr = unsafe {
+            self.allocator
+                .shrink(ptr, old_layout_with_footer, new_layout_with_footer)
+        }?
+        .cast::<u8>();
+
+        // SAFETY: buf_ptr is valid because allocation succeeded
+        unsafe {
+            core::ptr::write(
+                buf_ptr.as_ptr().add(footer_offset).cast(),
+                AllocationFooter::<A> {
+                    allocator_node: NonNull::from(self),
+                },
+            );
+        };
+
+        Ok(NonNull::slice_from_raw_parts(buf_ptr, new_layout.size()))
+    }
+
+    // SAFETY: layout and ptr have been used before to make an allocation
+    unsafe fn ref_from_allocation<'a>(
+        layout: Layout,
+        ptr: NonNull<u8>,
+    ) -> (Layout, &'a AllocatorNode<A>) {
+        let (layout_with_footer, footer_offset) = layout.extend(Layout::new::<Self>()).unwrap();
+
+        let footer_ptr: *mut AllocationFooter<A> = ptr.as_ptr().add(footer_offset).cast();
+
+        let allocator_node = NonNull::new_unchecked(footer_ptr)
+            .as_ref()
+            .allocator_node
+            .as_ref();
+
+        (layout_with_footer, allocator_node)
+    }
 }
 
 type AllocatorRef<A> = Cell<Option<NonNull<AllocatorNode<A>>>>;
@@ -73,6 +199,7 @@ type AllocatorRef<A> = Cell<Option<NonNull<AllocatorNode<A>>>>;
 /// ```
 /// #![feature(allocator_api)]
 ///
+/// use std::alloc::Allocator;
 /// use std::vec::Vec;
 /// use std::mem::size_of;
 /// use piece::LinearAllocator;
@@ -85,8 +212,8 @@ type AllocatorRef<A> = Cell<Option<NonNull<AllocatorNode<A>>>>;
 ///
 /// // Create two vectors that fills the whole `LinearAllocator`
 /// // Each `Vec` makes a single allocation
-/// let mut vec1 = Vec::with_capacity_in(32, &chain_allocator);
-/// let mut vec2 = Vec::with_capacity_in(32, &chain_allocator);
+/// let mut vec1 = Vec::with_capacity_in(32, chain_allocator.by_ref());
+/// let mut vec2 = Vec::with_capacity_in(32, chain_allocator.by_ref());
 ///
 /// vec1.extend_from_slice(&[1, 2, 3, 4, 5]);
 /// vec2.extend_from_slice(&[6, 7, 8, 9, 10]);
@@ -162,17 +289,121 @@ where
             return zero_sized_allocator.deallocate(ptr, layout);
         }
 
-        let (layout_with_footer, footer_offset) =
-            layout.extend(Layout::new::<AllocationFooter<A>>()).unwrap();
+        let (layout_with_footer, allocator_node) =
+            AllocatorNode::<A>::ref_from_allocation(layout, ptr);
 
-        let footer_ptr: *mut AllocationFooter<A> = ptr.as_ptr().add(footer_offset).cast();
+        allocator_node.allocator.deallocate(ptr, layout_with_footer);
+    }
 
-        NonNull::new_unchecked(footer_ptr)
-            .as_ref()
-            .allocator_node
-            .as_ref()
-            .allocator
-            .deallocate(ptr, layout_with_footer);
+    unsafe fn grow(
+        &self,
+        ptr: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> Result<NonNull<[u8]>, AllocError> {
+        debug_assert!(
+            new_layout.size() >= old_layout.size(),
+            "`new_layout.size()` must be greater than or equal to `old_layout.size()`"
+        );
+
+        if std::mem::size_of::<A>() == 0 {
+            let zero_sized_allocator = A::default();
+            return zero_sized_allocator.grow(ptr, old_layout, new_layout);
+        }
+
+        let (_, allocator_node) = AllocatorNode::<A>::ref_from_allocation(old_layout, ptr);
+
+        if let Ok(ptr) = allocator_node.grow_and_track(ptr, old_layout, new_layout) {
+            return Ok(ptr);
+        }
+
+        let new_ptr = self.allocate(new_layout)?;
+
+        // SAFETY: because `new_layout.size()` must be greater than or equal to
+        // `old_layout.size()`, both the old and new memory allocation are valid for reads and
+        // writes for `old_layout.size()` bytes. Also, because the old allocation wasn't yet
+        // deallocated, it cannot overlap `new_ptr`. Thus, the call to `copy_nonoverlapping` is
+        // safe. The safety contract for `dealloc` must be upheld by the caller.
+        unsafe {
+            std::ptr::copy_nonoverlapping(ptr.as_ptr(), new_ptr.cast().as_ptr(), old_layout.size());
+            self.deallocate(ptr, old_layout);
+        }
+
+        Ok(new_ptr)
+    }
+
+    unsafe fn grow_zeroed(
+        &self,
+        ptr: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> Result<NonNull<[u8]>, AllocError> {
+        debug_assert!(
+            new_layout.size() >= old_layout.size(),
+            "`new_layout.size()` must be greater than or equal to `old_layout.size()`"
+        );
+
+        if std::mem::size_of::<A>() == 0 {
+            let zero_sized_allocator = A::default();
+            return zero_sized_allocator.grow_zeroed(ptr, old_layout, new_layout);
+        }
+
+        let (_, allocator_node) = AllocatorNode::<A>::ref_from_allocation(old_layout, ptr);
+
+        if let Ok(ptr) = allocator_node.grow_zeroed_and_track(ptr, old_layout, new_layout) {
+            return Ok(ptr);
+        }
+
+        let new_ptr = self.allocate_zeroed(new_layout)?;
+
+        // SAFETY: because `new_layout.size()` must be greater than or equal to
+        // `old_layout.size()`, both the old and new memory allocation are valid for reads and
+        // writes for `old_layout.size()` bytes. Also, because the old allocation wasn't yet
+        // deallocated, it cannot overlap `new_ptr`. Thus, the call to `copy_nonoverlapping` is
+        // safe. The safety contract for `dealloc` must be upheld by the caller.
+        unsafe {
+            std::ptr::copy_nonoverlapping(ptr.as_ptr(), new_ptr.cast().as_ptr(), old_layout.size());
+            self.deallocate(ptr, old_layout);
+        }
+
+        Ok(new_ptr)
+    }
+
+    unsafe fn shrink(
+        &self,
+        ptr: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> Result<NonNull<[u8]>, AllocError> {
+        debug_assert!(
+            new_layout.size() <= old_layout.size(),
+            "`new_layout.size()` must be smaller than or equal to `old_layout.size()`"
+        );
+
+        if std::mem::size_of::<A>() == 0 {
+            let zero_sized_allocator = A::default();
+            return zero_sized_allocator.grow_zeroed(ptr, old_layout, new_layout);
+        }
+
+        let (_, allocator_node) = AllocatorNode::<A>::ref_from_allocation(old_layout, ptr);
+
+        if let Ok(ptr) = allocator_node.shrink_and_track(ptr, old_layout, new_layout) {
+            return Ok(ptr);
+        }
+
+        let new_ptr = self.allocate(new_layout)?;
+
+        // SAFETY: because `new_layout.size()` must be lower than or equal to
+        // `old_layout.size()`, both the old and new memory allocation are valid for reads and
+        // writes for `new_layout.size()` bytes. Also, because the old allocation wasn't yet
+        // deallocated, it cannot overlap `new_ptr`. Thus, the call to `copy_nonoverlapping` is
+        // safe. The safety contract for `dealloc` must be upheld by the caller.
+        unsafe {
+            std::ptr::copy_nonoverlapping(ptr.as_ptr(), new_ptr.cast().as_ptr(), new_layout.size());
+            self.deallocate(ptr, old_layout);
+        }
+
+        Ok(new_ptr)
     }
 }
 
@@ -241,8 +472,8 @@ mod test {
             LinearAllocator<{ 32 * size_of::<i32>() + size_of::<*const ()>() }>,
         >::new();
 
-        let mut vec1 = Vec::with_capacity_in(32, &chain_allocator);
-        let mut vec2 = Vec::with_capacity_in(32, &chain_allocator);
+        let mut vec1 = Vec::with_capacity_in(32, chain_allocator.by_ref());
+        let mut vec2 = Vec::with_capacity_in(32, chain_allocator.by_ref());
 
         vec1.extend_from_slice(&[1, 2, 3, 4, 5]);
         vec2.extend_from_slice(&[6, 7, 8, 9, 10]);
@@ -256,8 +487,8 @@ mod test {
     fn should_reuse_the_same_allocator() {
         let chain_allocator = ChainAllocator::<LinearAllocator<{ 1024 * size_of::<i32>() }>>::new();
 
-        let mut vec1 = Vec::with_capacity_in(32, &chain_allocator);
-        let mut vec2 = Vec::with_capacity_in(32, &chain_allocator);
+        let mut vec1 = Vec::with_capacity_in(32, chain_allocator.by_ref());
+        let mut vec2 = Vec::with_capacity_in(32, chain_allocator.by_ref());
 
         vec1.extend_from_slice(&[1, 2, 3, 4, 5]);
         vec2.extend_from_slice(&[6, 7, 8, 9, 10]);
@@ -302,8 +533,8 @@ mod test {
 
         let chain_allocator = ChainAllocator::<StubAllocator>::new();
 
-        let mut vec1: Vec<i32, _> = Vec::with_capacity_in(32, &chain_allocator);
-        let mut vec2: Vec<i32, _> = Vec::with_capacity_in(32, &chain_allocator);
+        let mut vec1: Vec<i32, _> = Vec::with_capacity_in(32, chain_allocator.by_ref());
+        let mut vec2: Vec<i32, _> = Vec::with_capacity_in(32, chain_allocator.by_ref());
 
         vec1.extend_from_slice(&[1, 2, 3, 4, 5]);
         vec2.extend_from_slice(&[6, 7, 8, 9, 10]);
@@ -321,19 +552,116 @@ mod test {
             LinearAllocator<{ 32 * size_of::<i32>() + size_of::<*const ()>() }>,
         >::new();
 
-        let mut vec1 = Vec::with_capacity_in(32, &chain_allocator);
+        let mut vec1 = Vec::with_capacity_in(32, chain_allocator.by_ref());
         vec1.extend_from_slice(&[1, 2, 3, 4, 5]);
         assert_eq!(vec1, &[1, 2, 3, 4, 5]);
         assert_eq!(chain_allocator.allocator_count(), 1);
         drop(vec1);
 
         let handle = std::thread::spawn(move || {
-            let mut vec2 = Vec::with_capacity_in(32, &chain_allocator);
+            let mut vec2 = Vec::with_capacity_in(32, chain_allocator.by_ref());
             vec2.extend_from_slice(&[6, 7, 8, 9, 10]);
             assert_eq!(vec2, &[6, 7, 8, 9, 10]);
             assert_eq!(chain_allocator.allocator_count(), 2);
         });
 
         let _ = handle.join();
+    }
+
+    #[test]
+    fn should_alloc_zeroed() {
+        let chain_allocator =
+            ChainAllocator::<LinearAllocator<{ 32 + size_of::<*const ()>() }>>::new();
+
+        let layout = Layout::array::<u8>(32).unwrap();
+        let allocation = chain_allocator.allocate_zeroed(layout).unwrap();
+
+        let slice = unsafe { allocation.as_ref() };
+        assert_eq!(slice.len(), 32);
+        assert_eq!(slice, [0; 32]);
+        assert_eq!(chain_allocator.allocator_count(), 1);
+
+        unsafe { chain_allocator.deallocate(allocation.cast(), layout) };
+    }
+
+    #[test]
+    fn should_grow_allocation() {
+        let chain_allocator =
+            ChainAllocator::<LinearAllocator<{ 128 + size_of::<*const ()>() }>>::new();
+
+        let old_layout = Layout::array::<u8>(32).unwrap();
+        let old_allocation = chain_allocator.allocate(old_layout).unwrap();
+
+        let new_layout = Layout::array::<u8>(64).unwrap();
+
+        let new_allocation = unsafe {
+            chain_allocator
+                .grow(old_allocation.cast(), old_layout, new_layout)
+                .unwrap()
+        };
+
+        let slice = unsafe { new_allocation.as_ref() };
+        assert_eq!(slice.len(), 64);
+
+        unsafe { chain_allocator.deallocate(new_allocation.cast(), new_layout) };
+    }
+
+    #[test]
+    fn should_grow_zeroed_allocation() {
+        let chain_allocator =
+            ChainAllocator::<LinearAllocator<{ 128 + size_of::<*const ()>() }>>::new();
+
+        let old_layout = Layout::array::<u8>(32).unwrap();
+        let mut old_allocation = chain_allocator.allocate(old_layout).unwrap();
+
+        {
+            let slice = unsafe { old_allocation.as_mut() };
+            slice.fill(1);
+            assert_eq!(slice, [1; 32]);
+        }
+
+        let new_layout = Layout::array::<u8>(64).unwrap();
+        let new_allocation = unsafe {
+            chain_allocator
+                .grow_zeroed(old_allocation.cast(), old_layout, new_layout)
+                .unwrap()
+        };
+
+        let slice = unsafe { new_allocation.as_ref() };
+
+        assert_eq!(slice.len(), 64);
+        assert_eq!(slice[..32], [1; 32]);
+        assert_eq!(slice[32..], [0; 32]);
+
+        unsafe { chain_allocator.deallocate(new_allocation.cast(), new_layout) };
+    }
+
+    #[test]
+    fn should_shrink_allocation() {
+        let chain_allocator =
+            ChainAllocator::<LinearAllocator<{ 128 + size_of::<*const ()>() }>>::new();
+
+        let old_layout = Layout::array::<u8>(64).unwrap();
+        let mut old_allocation = chain_allocator.allocate(old_layout).unwrap();
+
+        {
+            let slice = unsafe { old_allocation.as_mut() };
+            slice.fill(1);
+            assert_eq!(slice, [1; 64]);
+        }
+
+        let new_layout = Layout::array::<u8>(32).unwrap();
+        let new_allocation = unsafe {
+            chain_allocator
+                .shrink(old_allocation.cast(), old_layout, new_layout)
+                .unwrap()
+        };
+
+        let slice = unsafe { new_allocation.as_ref() };
+
+        assert_eq!(slice.len(), 32);
+        assert_eq!(slice, [1; 32]);
+
+        unsafe { chain_allocator.deallocate(new_allocation.cast(), new_layout) };
     }
 }

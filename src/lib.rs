@@ -5,6 +5,8 @@
     clippy::nursery,
     clippy::std_instead_of_core
 )]
+//! # About
+//! A collection of composable allocators.
 
 mod chain_allocator;
 mod linear_allocator;
