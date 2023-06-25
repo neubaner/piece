@@ -1,4 +1,4 @@
-use std::{
+use core::{
     alloc::{AllocError, Allocator, Layout},
     ptr::NonNull,
     sync::atomic::AtomicUsize,
@@ -11,7 +11,7 @@ pub struct LinearAllocator<const SIZE: usize> {
 
 unsafe impl<const SIZE: usize> Allocator for LinearAllocator<SIZE> {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-        use std::sync::atomic::Ordering;
+        use core::sync::atomic::Ordering;
 
         loop {
             let len = self.len.load(Ordering::Acquire);
@@ -62,6 +62,7 @@ unsafe impl<const SIZE: usize> Sync for LinearAllocator<SIZE> {}
 unsafe impl<const SIZE: usize> Send for LinearAllocator<SIZE> {}
 
 impl<const SIZE: usize> LinearAllocator<SIZE> {
+    #[must_use]
     pub fn new() -> Self {
         // TODO(gneubaner): Can replace this runtime assertion when generic_const_exprs is stable
         assert!(SIZE > 0);

@@ -1,4 +1,4 @@
-use std::{
+use core::{
     alloc::{AllocError, Allocator, Layout},
     cell::Cell,
     marker::PhantomData,
@@ -112,8 +112,8 @@ impl<A: Allocator> AllocatorNode<A> {
             core::ptr::write_bytes(
                 buf_ptr.as_ptr().add(old_footer_offset),
                 0,
-                std::mem::size_of::<AllocationFooter<A>>(),
-            )
+                core::mem::size_of::<AllocationFooter<A>>(),
+            );
         };
 
         // SAFETY: buf_ptr is valid because allocation succeeded
@@ -163,10 +163,7 @@ impl<A: Allocator> AllocatorNode<A> {
     }
 
     // SAFETY: layout and ptr have been used before to make an allocation
-    unsafe fn ref_from_allocation<'a>(
-        layout: Layout,
-        ptr: NonNull<u8>,
-    ) -> (Layout, &'a AllocatorNode<A>) {
+    unsafe fn ref_from_allocation<'a>(layout: Layout, ptr: NonNull<u8>) -> (Layout, &'a Self) {
         let (layout_with_footer, footer_offset) = layout.extend(Layout::new::<Self>()).unwrap();
 
         let footer_ptr: *mut AllocationFooter<A> = ptr.as_ptr().add(footer_offset).cast();
@@ -199,9 +196,9 @@ type AllocatorRef<A> = Cell<Option<NonNull<AllocatorNode<A>>>>;
 /// ```
 /// #![feature(allocator_api)]
 ///
-/// use std::alloc::Allocator;
-/// use std::vec::Vec;
-/// use std::mem::size_of;
+/// use core::alloc::Allocator;
+/// use core::vec::Vec;
+/// use core::mem::size_of;
 /// use piece::LinearAllocator;
 /// use piece::ChainAllocator;
 ///
@@ -225,7 +222,7 @@ type AllocatorRef<A> = Cell<Option<NonNull<AllocatorNode<A>>>>;
 /// ```
 ///
 /// [`LinearAllocator`]: crate::linear_allocator::LinearAllocator
-/// [`Global`]: std::alloc::Global
+/// [`Global`]: core::alloc::Global
 pub struct ChainAllocator<A> {
     next_allocator: AllocatorRef<A>,
     _owns: PhantomData<AllocatorNode<A>>,
@@ -253,28 +250,29 @@ where
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         // No need to track zero size allocators(like Global), they are already free to create and
         // all instances should be the same
-        if std::mem::size_of::<A>() == 0 {
+        if core::mem::size_of::<A>() == 0 {
             let zero_sized_allocator = A::default();
             return zero_sized_allocator.allocate(layout);
         }
 
         match self.next_allocator.get() {
-            None => {
-                let allocator_node = AllocatorNode::new();
-
-                self.allocate_and_track_node(allocator_node, layout)
-            }
             Some(next_allocator_node_ptr) => {
                 // SAFETY: Should be safe because ChainAllocator is not `Sync` and `Send`
                 let next_allocator_node = unsafe { next_allocator_node_ptr.as_ref() };
 
-                if let Ok(buf_ptr) = next_allocator_node.allocate_and_track(layout) {
-                    Ok(buf_ptr)
-                } else {
-                    let allocator_node = AllocatorNode::with_next(next_allocator_node_ptr);
+                match next_allocator_node.allocate_and_track(layout) {
+                    Ok(buf_ptr) => Ok(buf_ptr),
+                    Err(_) => {
+                        let allocator_node = AllocatorNode::with_next(next_allocator_node_ptr);
 
-                    self.allocate_and_track_node(allocator_node, layout)
+                        self.allocate_and_track_node(allocator_node, layout)
+                    }
                 }
+            }
+            None => {
+                let allocator_node = AllocatorNode::new();
+
+                self.allocate_and_track_node(allocator_node, layout)
             }
         }
     }
@@ -284,7 +282,7 @@ where
         // No need to track zero size allocators(like Global), they are already free to create and
         // all instances should be the same
 
-        if std::mem::size_of::<A>() == 0 {
+        if core::mem::size_of::<A>() == 0 {
             let zero_sized_allocator = A::default();
             return zero_sized_allocator.deallocate(ptr, layout);
         }
@@ -306,7 +304,7 @@ where
             "`new_layout.size()` must be greater than or equal to `old_layout.size()`"
         );
 
-        if std::mem::size_of::<A>() == 0 {
+        if core::mem::size_of::<A>() == 0 {
             let zero_sized_allocator = A::default();
             return zero_sized_allocator.grow(ptr, old_layout, new_layout);
         }
@@ -325,7 +323,11 @@ where
         // deallocated, it cannot overlap `new_ptr`. Thus, the call to `copy_nonoverlapping` is
         // safe. The safety contract for `dealloc` must be upheld by the caller.
         unsafe {
-            std::ptr::copy_nonoverlapping(ptr.as_ptr(), new_ptr.cast().as_ptr(), old_layout.size());
+            core::ptr::copy_nonoverlapping(
+                ptr.as_ptr(),
+                new_ptr.cast().as_ptr(),
+                old_layout.size(),
+            );
             self.deallocate(ptr, old_layout);
         }
 
@@ -343,7 +345,7 @@ where
             "`new_layout.size()` must be greater than or equal to `old_layout.size()`"
         );
 
-        if std::mem::size_of::<A>() == 0 {
+        if core::mem::size_of::<A>() == 0 {
             let zero_sized_allocator = A::default();
             return zero_sized_allocator.grow_zeroed(ptr, old_layout, new_layout);
         }
@@ -362,7 +364,11 @@ where
         // deallocated, it cannot overlap `new_ptr`. Thus, the call to `copy_nonoverlapping` is
         // safe. The safety contract for `dealloc` must be upheld by the caller.
         unsafe {
-            std::ptr::copy_nonoverlapping(ptr.as_ptr(), new_ptr.cast().as_ptr(), old_layout.size());
+            core::ptr::copy_nonoverlapping(
+                ptr.as_ptr(),
+                new_ptr.cast().as_ptr(),
+                old_layout.size(),
+            );
             self.deallocate(ptr, old_layout);
         }
 
@@ -380,7 +386,7 @@ where
             "`new_layout.size()` must be smaller than or equal to `old_layout.size()`"
         );
 
-        if std::mem::size_of::<A>() == 0 {
+        if core::mem::size_of::<A>() == 0 {
             let zero_sized_allocator = A::default();
             return zero_sized_allocator.grow_zeroed(ptr, old_layout, new_layout);
         }
@@ -399,7 +405,11 @@ where
         // deallocated, it cannot overlap `new_ptr`. Thus, the call to `copy_nonoverlapping` is
         // safe. The safety contract for `dealloc` must be upheld by the caller.
         unsafe {
-            std::ptr::copy_nonoverlapping(ptr.as_ptr(), new_ptr.cast().as_ptr(), new_layout.size());
+            core::ptr::copy_nonoverlapping(
+                ptr.as_ptr(),
+                new_ptr.cast().as_ptr(),
+                new_layout.size(),
+            );
             self.deallocate(ptr, old_layout);
         }
 
@@ -459,7 +469,8 @@ impl<A> ChainAllocator<A> {
 
 #[cfg(test)]
 mod test {
-    use std::{alloc::Global, mem::size_of, sync::Mutex};
+    use core::mem::size_of;
+    use std::{alloc::Global, sync::Mutex};
 
     use crate::linear_allocator::LinearAllocator;
 

@@ -1,10 +1,5 @@
 #![feature(allocator_api)]
-#![warn(
-    clippy::all,
-    clippy::pedantic,
-    clippy::nursery,
-    clippy::std_instead_of_core
-)]
+#![warn(clippy::all, clippy::std_instead_of_core, clippy::cargo)]
 //! # About
 //! A collection of composable allocators.
 
