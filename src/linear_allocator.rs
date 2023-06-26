@@ -8,6 +8,27 @@ use core::{
 ///
 /// This allocator is useful when you want a "scratch space" for multiple tiny allocations
 /// that share the same lifetime.
+///
+/// # Usage:
+/// ```
+/// #![feature(allocator_api)]
+///
+/// use core::{alloc::Allocator, mem::size_of};
+/// use std::vec::Vec;
+///
+/// use piece::LinearAllocator;
+///
+/// let linear_allocator = LinearAllocator::<{ 64 * size_of::<i32>() }>::new();
+///
+/// let mut vec1 = Vec::with_capacity_in(32, linear_allocator.by_ref());
+/// let mut vec2 = Vec::with_capacity_in(32, linear_allocator.by_ref());
+///
+/// vec1.extend_from_slice(&[1, 2, 3, 4, 5]);
+/// vec2.extend_from_slice(&[6, 7, 8, 9, 10]);
+///
+/// assert_eq!(vec1, &[1, 2, 3, 4, 5]);
+/// assert_eq!(vec2, &[6, 7, 8, 9, 10]);
+/// ```
 pub struct LinearAllocator<const SIZE: usize> {
     buf: NonNull<u8>,
     len: AtomicUsize,

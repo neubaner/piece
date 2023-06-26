@@ -14,6 +14,26 @@ and use it to make allocations. Once the buffer is full, all next allocations fa
 This allocator is useful when you want a "scratch space" for multiple tiny allocations
 that share the same lifetime.
 
+Usage:
+```
+#![feature(allocator_api)]
+
+use core::{alloc::Allocator, mem::size_of};
+use std::vec::Vec;
+
+use piece::LinearAllocator;
+
+let linear_allocator = LinearAllocator::<{ 64 * size_of::<i32>() }>::new();
+
+let mut vec1 = Vec::with_capacity_in(32, linear_allocator.by_ref());
+let mut vec2 = Vec::with_capacity_in(32, linear_allocator.by_ref());
+
+vec1.extend_from_slice(&[1, 2, 3, 4, 5]);
+vec2.extend_from_slice(&[6, 7, 8, 9, 10]);
+
+assert_eq!(vec1, &[1, 2, 3, 4, 5]);
+assert_eq!(vec2, &[6, 7, 8, 9, 10]);
+```
 
 ### Chain allocator
 A `piece::ChainAllocator<A>` create a new allocator of type `A` when the existing allocators of this
@@ -23,3 +43,31 @@ all of its memory is used, the `ChainAllocator` will create a new one. This is u
 you want to use fixed-sized allocators but you're worried that your program will run out of
 memory.
 
+Usage:
+```rust
+#![feature(allocator_api)]
+
+use core::{alloc::Allocator, mem::size_of};
+use std::vec::Vec;
+
+use piece::LinearAllocator;
+use piece::ChainAllocator;
+
+// Make room for the allocator pointer
+type MyAllocator = LinearAllocator<{ 32 * size_of::<i32>() + size_of::<*const ()>() }>;
+
+let chain_allocator = ChainAllocator::<MyAllocator>::new();
+
+// Create two vectors that fills the whole `LinearAllocator`
+// Each `Vec` makes a single allocation
+let mut vec1 = Vec::with_capacity_in(32, chain_allocator.by_ref());
+let mut vec2 = Vec::with_capacity_in(32, chain_allocator.by_ref());
+
+vec1.extend_from_slice(&[1, 2, 3, 4, 5]);
+vec2.extend_from_slice(&[6, 7, 8, 9, 10]);
+
+assert_eq!(vec1, &[1, 2, 3, 4, 5]);
+assert_eq!(vec2, &[6, 7, 8, 9, 10]);
+
+assert_eq!(2, chain_allocator.allocator_count());
+```
