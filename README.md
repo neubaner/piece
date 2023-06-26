@@ -15,7 +15,7 @@ This allocator is useful when you want a "scratch space" for multiple tiny alloc
 that share the same lifetime.
 
 Usage:
-```
+```rust
 #![feature(allocator_api)]
 
 use core::{alloc::Allocator, mem::size_of};
