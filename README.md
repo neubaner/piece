@@ -1,4 +1,6 @@
 # Piece
+[![Crates.io](https://img.shields.io/crates/v/piece)](https://crates.io/crates/piece)
+[![Documentation](https://docs.rs/piece/badge.svg)](https://docs.rs/piece)
 
 Piece is a collection of composable allocators for rust. 
 
