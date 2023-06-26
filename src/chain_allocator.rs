@@ -196,9 +196,9 @@ type AllocatorRef<A> = Cell<Option<NonNull<AllocatorNode<A>>>>;
 /// ```
 /// #![feature(allocator_api)]
 ///
-/// use core::alloc::Allocator;
-/// use core::vec::Vec;
-/// use core::mem::size_of;
+/// use core::{alloc::Allocator, mem::size_of};
+/// use std::vec::Vec;
+///
 /// use piece::LinearAllocator;
 /// use piece::ChainAllocator;
 ///
@@ -221,8 +221,8 @@ type AllocatorRef<A> = Cell<Option<NonNull<AllocatorNode<A>>>>;
 /// assert_eq!(2, chain_allocator.allocator_count());
 /// ```
 ///
-/// [`LinearAllocator`]: crate::linear_allocator::LinearAllocator
-/// [`Global`]: core::alloc::Global
+/// [`LinearAllocator`]: crate::LinearAllocator
+/// [`Global`]: std::alloc::Global
 pub struct ChainAllocator<A> {
     next_allocator: AllocatorRef<A>,
     _owns: PhantomData<AllocatorNode<A>>,

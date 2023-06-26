@@ -3,7 +3,11 @@ use core::{
     ptr::NonNull,
     sync::atomic::AtomicUsize,
 };
-
+/// [`LinearAllocator`] is an allocator that keeps a fixed-sized buffer internally
+/// and use it to make allocations. Once the buffer is full, all next allocations fails.
+///
+/// This allocator is useful when you want a "scratch space" for multiple tiny allocations
+/// that share the same lifetime.
 pub struct LinearAllocator<const SIZE: usize> {
     buf: NonNull<u8>,
     len: AtomicUsize,
@@ -86,8 +90,8 @@ impl<const SIZE: usize> Default for LinearAllocator<SIZE> {
 
 #[cfg(test)]
 mod test {
-    use std::mem::size_of;
-    use std::sync::atomic::Ordering;
+    use core::mem::size_of;
+    use core::sync::atomic::Ordering;
 
     use super::*;
 
