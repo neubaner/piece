@@ -78,7 +78,7 @@ impl<const SIZE: usize> Drop for LinearAllocator<SIZE> {
     fn drop(&mut self) {
         // SAFETY: buf pointer was allocated with std::alloc::alloc with the same layout
         unsafe {
-            std::alloc::dealloc(self.buf.as_ptr(), Layout::array::<u8>(SIZE).unwrap());
+            alloc::alloc::dealloc(self.buf.as_ptr(), Layout::array::<u8>(SIZE).unwrap());
         }
     }
 }
@@ -93,7 +93,7 @@ impl<const SIZE: usize> LinearAllocator<SIZE> {
         assert!(SIZE > 0);
 
         // SAFETY: the assertion above ensures that layout size is greater than zero
-        let mem_ptr = unsafe { std::alloc::alloc(Layout::array::<u8>(SIZE).unwrap()) };
+        let mem_ptr = unsafe { alloc::alloc::alloc(Layout::array::<u8>(SIZE).unwrap()) };
         let mem_ptr = NonNull::new(mem_ptr).unwrap();
 
         Self {

@@ -1,5 +1,5 @@
--[ ] Add README.md
--[ ] Upload crate
+-[X] Add README.md
+-[X] Upload crate
 -[ ] LinearAllocator:
     -[ ] Prefer to use a runtime size instead of a const size.
 -[ ] ChainAllocator:

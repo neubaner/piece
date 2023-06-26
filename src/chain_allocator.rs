@@ -1,3 +1,4 @@
+use alloc::boxed::Box;
 use core::{
     alloc::{AllocError, Allocator, Layout},
     cell::Cell,
