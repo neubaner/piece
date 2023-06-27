@@ -198,9 +198,9 @@ type AllocatorRef<A> = Cell<Option<NonNull<AllocatorNode<A>>>>;
 /// use piece::ChainAllocator;
 ///
 /// // Make room for the allocator pointer
-/// type MyAllocator = LinearAllocator<{ 32 * size_of::<i32>() + size_of::<*const ()>() }>;
-///
-/// let chain_allocator = ChainAllocator::new(|| MyAllocator::new());
+/// let chain_allocator = ChainAllocator::new(|| {
+///     LinearAllocator::with_capacity(32 * size_of::<i32>() + size_of::<*const ()>())
+/// });
 ///
 /// // Create two vectors that fills the whole `LinearAllocator` so
 /// // each `Vec` creates a new allocator
@@ -217,7 +217,7 @@ type AllocatorRef<A> = Cell<Option<NonNull<AllocatorNode<A>>>>;
 /// ```
 ///
 /// [`LinearAllocator`]: crate::LinearAllocator
-/// [`Global`]: std::alloc::Global
+/// [`Global`]: alloc::alloc::Global
 pub struct ChainAllocator<A, F> {
     next_allocator: AllocatorRef<A>,
     _owns: PhantomData<AllocatorNode<A>>,
@@ -445,7 +445,7 @@ impl<A, F> ChainAllocator<A, F>
 where
     F: Fn() -> A,
 {
-    /// Creates a empty [`ChainAllocator<A>`].
+    /// Creates a empty [`ChainAllocator<A>`]. `allocator_factory` should create a fresh allocator.
     #[inline]
     #[must_use]
     pub const fn new(allocator_factory: F) -> Self {
@@ -484,7 +484,7 @@ mod test {
     fn should_create_a_new_allocator_when_needed() {
         // NOTE(gneubaner): each allocation has a pointer to the allocator used
         let chain_allocator = ChainAllocator::new(|| {
-            LinearAllocator::<{ 32 * size_of::<i32>() + size_of::<*const ()>() }>::new()
+            LinearAllocator::with_capacity(32 * size_of::<i32>() + size_of::<*const ()>())
         });
 
         let mut vec1 = Vec::with_capacity_in(32, chain_allocator.by_ref());
@@ -501,7 +501,7 @@ mod test {
     #[test]
     fn should_reuse_the_same_allocator() {
         let chain_allocator =
-            ChainAllocator::new(|| LinearAllocator::<{ 1024 * size_of::<i32>() }>::new());
+            ChainAllocator::new(|| LinearAllocator::with_capacity(1024 * size_of::<i32>()));
 
         let mut vec1 = Vec::with_capacity_in(32, chain_allocator.by_ref());
         let mut vec2 = Vec::with_capacity_in(32, chain_allocator.by_ref());
@@ -564,7 +564,7 @@ mod test {
     fn should_be_safe_to_send_across_threads() {
         // NOTE(gneubaner): each allocation has a pointer to the allocator used
         let chain_allocator = ChainAllocator::new(|| {
-            LinearAllocator::<{ 32 * size_of::<i32>() + size_of::<*const ()>() }>::new()
+            LinearAllocator::with_capacity(32 * size_of::<i32>() + size_of::<*const ()>())
         });
 
         let mut vec1 = Vec::with_capacity_in(32, chain_allocator.by_ref());
@@ -586,7 +586,7 @@ mod test {
     #[test]
     fn should_alloc_zeroed() {
         let chain_allocator =
-            ChainAllocator::new(|| LinearAllocator::<{ 32 + size_of::<*const ()>() }>::new());
+            ChainAllocator::new(|| LinearAllocator::with_capacity(32 + size_of::<*const ()>()));
 
         let layout = Layout::array::<u8>(32).unwrap();
         let allocation = chain_allocator.allocate_zeroed(layout).unwrap();
@@ -602,7 +602,7 @@ mod test {
     #[test]
     fn should_grow_allocation() {
         let chain_allocator =
-            ChainAllocator::new(|| LinearAllocator::<{ 128 + size_of::<*const ()>() }>::new());
+            ChainAllocator::new(|| LinearAllocator::with_capacity(128 + size_of::<*const ()>()));
 
         let old_layout = Layout::array::<u8>(32).unwrap();
         let old_allocation = chain_allocator.allocate(old_layout).unwrap();
@@ -624,7 +624,7 @@ mod test {
     #[test]
     fn should_grow_zeroed_allocation() {
         let chain_allocator =
-            ChainAllocator::new(|| LinearAllocator::<{ 128 + size_of::<*const ()>() }>::new());
+            ChainAllocator::new(|| LinearAllocator::with_capacity(128 + size_of::<*const ()>()));
 
         let old_layout = Layout::array::<u8>(32).unwrap();
         let mut old_allocation = chain_allocator.allocate(old_layout).unwrap();
@@ -654,7 +654,7 @@ mod test {
     #[test]
     fn should_shrink_allocation() {
         let chain_allocator =
-            ChainAllocator::new(|| LinearAllocator::<{ 128 + size_of::<*const ()>() }>::new());
+            ChainAllocator::new(|| LinearAllocator::with_capacity(128 + size_of::<*const ()>()));
 
         let old_layout = Layout::array::<u8>(64).unwrap();
         let mut old_allocation = chain_allocator.allocate(old_layout).unwrap();

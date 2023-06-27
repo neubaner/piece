@@ -23,7 +23,7 @@ use std::vec::Vec;
 
 use piece::LinearAllocator;
 
-let linear_allocator = LinearAllocator::<{ 64 * size_of::<i32>() }>::new();
+let linear_allocator = LinearAllocator::with_capacity(64 * size_of::<i32>());
 
 let mut vec1 = Vec::with_capacity_in(32, linear_allocator.by_ref());
 let mut vec2 = Vec::with_capacity_in(32, linear_allocator.by_ref());
@@ -36,7 +36,7 @@ assert_eq!(vec2, &[6, 7, 8, 9, 10]);
 ```
 
 ### Chain allocator
-A `piece::ChainAllocator<A>` create a new allocator of type `A` when the existing allocators of this
+A `piece::ChainAllocator` create a new allocator of type `A` when the existing allocators of this
 
 It can be useful when used with a `piece::LinearAllocator` for example. When
 all of its memory is used, the `ChainAllocator` will create a new one. This is useful when
@@ -54,12 +54,12 @@ use piece::LinearAllocator;
 use piece::ChainAllocator;
 
 // Make room for the allocator pointer
-type MyAllocator = LinearAllocator<{ 32 * size_of::<i32>() + size_of::<*const ()>() }>;
+let chain_allocator = ChainAllocator::new(|| {
+    LinearAllocator::with_capacity(32 * size_of::<i32>() + size_of::<*const ()>())
+});
 
-let chain_allocator = ChainAllocator::<MyAllocator>::new();
-
-// Create two vectors that fills the whole `LinearAllocator`
-// Each `Vec` makes a single allocation
+// Create two vectors that fills the whole `LinearAllocator` so
+// each `Vec` creates a new allocator
 let mut vec1 = Vec::with_capacity_in(32, chain_allocator.by_ref());
 let mut vec2 = Vec::with_capacity_in(32, chain_allocator.by_ref());
 

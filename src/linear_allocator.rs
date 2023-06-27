@@ -18,7 +18,7 @@ use core::{
 ///
 /// use piece::LinearAllocator;
 ///
-/// let linear_allocator = LinearAllocator::<{ 64 * size_of::<i32>() }>::new();
+/// let linear_allocator = LinearAllocator::with_capacity(64 * size_of::<i32>());
 ///
 /// let mut vec1 = Vec::with_capacity_in(32, linear_allocator.by_ref());
 /// let mut vec2 = Vec::with_capacity_in(32, linear_allocator.by_ref());
@@ -29,12 +29,13 @@ use core::{
 /// assert_eq!(vec1, &[1, 2, 3, 4, 5]);
 /// assert_eq!(vec2, &[6, 7, 8, 9, 10]);
 /// ```
-pub struct LinearAllocator<const SIZE: usize> {
+pub struct LinearAllocator {
     buf: NonNull<u8>,
     len: AtomicUsize,
+    capacity: usize,
 }
 
-unsafe impl<const SIZE: usize> Allocator for LinearAllocator<SIZE> {
+unsafe impl Allocator for LinearAllocator {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         use core::sync::atomic::Ordering;
 
@@ -47,7 +48,7 @@ unsafe impl<const SIZE: usize> Allocator for LinearAllocator<SIZE> {
             let start_offset = len + padding;
             let new_len = start_offset + layout.size();
 
-            if SIZE < new_len {
+            if self.capacity < new_len {
                 return Err(AllocError);
             }
 
@@ -74,38 +75,38 @@ unsafe impl<const SIZE: usize> Allocator for LinearAllocator<SIZE> {
     unsafe fn deallocate(&self, _ptr: NonNull<u8>, _layout: Layout) {}
 }
 
-impl<const SIZE: usize> Drop for LinearAllocator<SIZE> {
+impl Drop for LinearAllocator {
     fn drop(&mut self) {
         // SAFETY: buf pointer was allocated with std::alloc::alloc with the same layout
         unsafe {
-            alloc::alloc::dealloc(self.buf.as_ptr(), Layout::array::<u8>(SIZE).unwrap());
+            alloc::alloc::dealloc(
+                self.buf.as_ptr(),
+                Layout::array::<u8>(self.capacity).unwrap(),
+            );
         }
     }
 }
 
-unsafe impl<const SIZE: usize> Sync for LinearAllocator<SIZE> {}
-unsafe impl<const SIZE: usize> Send for LinearAllocator<SIZE> {}
+unsafe impl Sync for LinearAllocator {}
+unsafe impl Send for LinearAllocator {}
 
-impl<const SIZE: usize> LinearAllocator<SIZE> {
+impl LinearAllocator {
+    /// Creates a new LinearAllocator with the specified `capacity`
+    ///
+    /// PANIC:
+    /// `capacity` must be greater than zero
     #[must_use]
-    pub fn new() -> Self {
-        // TODO(gneubaner): Can replace this runtime assertion when generic_const_exprs is stable
-        assert!(SIZE > 0);
-
+    pub fn with_capacity(capacity: usize) -> Self {
+        assert!(capacity > 0);
         // SAFETY: the assertion above ensures that layout size is greater than zero
-        let mem_ptr = unsafe { alloc::alloc::alloc(Layout::array::<u8>(SIZE).unwrap()) };
+        let mem_ptr = unsafe { alloc::alloc::alloc(Layout::array::<u8>(capacity).unwrap()) };
         let mem_ptr = NonNull::new(mem_ptr).unwrap();
 
         Self {
             len: AtomicUsize::new(0),
             buf: mem_ptr,
+            capacity,
         }
-    }
-}
-
-impl<const SIZE: usize> Default for LinearAllocator<SIZE> {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -118,7 +119,7 @@ mod test {
 
     #[test]
     fn should_keep_allocation_for_the_lifetime() {
-        let linear_allocator = LinearAllocator::<{ 1024 * size_of::<i32>() }>::new();
+        let linear_allocator = LinearAllocator::with_capacity(1024 * size_of::<i32>());
 
         let mut vec1 = Vec::with_capacity_in(32, &linear_allocator);
         let mut vec2 = Vec::with_capacity_in(32, &linear_allocator);
@@ -142,7 +143,7 @@ mod test {
 
     #[test]
     fn should_reuse_block() {
-        let linear_allocator = LinearAllocator::<{ 1024 * size_of::<i32>() }>::new();
+        let linear_allocator = LinearAllocator::with_capacity(1024 * size_of::<i32>());
         let vec1: Vec<i32, _> = Vec::with_capacity_in(512, &linear_allocator);
 
         drop(vec1);
@@ -158,7 +159,7 @@ mod test {
 
     #[test]
     fn linear_allocator_should_work_on_a_multithread_environment() {
-        let linear_allocator = LinearAllocator::<{ 1024 * 1024 * 1024 }>::new();
+        let linear_allocator = LinearAllocator::with_capacity(1024 * 1024 * 1024);
 
         std::thread::scope(|s| {
             let linear_allocator = &linear_allocator;
