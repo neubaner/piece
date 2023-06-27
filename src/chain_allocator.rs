@@ -13,23 +13,17 @@ struct AllocatorNode<A> {
 }
 
 impl<A: Allocator> AllocatorNode<A> {
-    fn new() -> Self
-    where
-        A: Default,
-    {
+    fn new(allocator: A) -> Self {
         Self {
-            allocator: A::default(),
+            allocator,
             next_allocator: AllocatorRef::new(None),
             _owns: PhantomData,
         }
     }
 
-    fn with_next(next: NonNull<Self>) -> Self
-    where
-        A: Default,
-    {
+    fn with_next(allocator: A, next: NonNull<Self>) -> Self {
         Self {
-            allocator: A::default(),
+            allocator,
             next_allocator: AllocatorRef::new(Some(next)),
             _owns: PhantomData,
         }
@@ -206,10 +200,10 @@ type AllocatorRef<A> = Cell<Option<NonNull<AllocatorNode<A>>>>;
 /// // Make room for the allocator pointer
 /// type MyAllocator = LinearAllocator<{ 32 * size_of::<i32>() + size_of::<*const ()>() }>;
 ///
-/// let chain_allocator = ChainAllocator::<MyAllocator>::new();
+/// let chain_allocator = ChainAllocator::new(|| MyAllocator::new());
 ///
-/// // Create two vectors that fills the whole `LinearAllocator`
-/// // Each `Vec` makes a single allocation
+/// // Create two vectors that fills the whole `LinearAllocator` so
+/// // each `Vec` creates a new allocator
 /// let mut vec1 = Vec::with_capacity_in(32, chain_allocator.by_ref());
 /// let mut vec2 = Vec::with_capacity_in(32, chain_allocator.by_ref());
 ///
@@ -224,16 +218,17 @@ type AllocatorRef<A> = Cell<Option<NonNull<AllocatorNode<A>>>>;
 ///
 /// [`LinearAllocator`]: crate::LinearAllocator
 /// [`Global`]: std::alloc::Global
-pub struct ChainAllocator<A> {
+pub struct ChainAllocator<A, F> {
     next_allocator: AllocatorRef<A>,
     _owns: PhantomData<AllocatorNode<A>>,
+    allocator_factory: F,
 }
 
 // SAFETY: It's safe to send them across threads because there's no way to get a references to
 // allocation nodes, so no alias happens
-unsafe impl<A: Send> Send for ChainAllocator<A> {}
+unsafe impl<A: Send, F> Send for ChainAllocator<A, F> {}
 
-impl<A> Drop for ChainAllocator<A> {
+impl<A, F> Drop for ChainAllocator<A, F> {
     fn drop(&mut self) {
         while let Some(alloc_node_ptr) = self.next_allocator.get() {
             // SAFETY: alloc_node_ptr was allocated using `Box` and it's never dereferenced again
@@ -243,16 +238,17 @@ impl<A> Drop for ChainAllocator<A> {
     }
 }
 
-unsafe impl<A> Allocator for ChainAllocator<A>
+unsafe impl<A, F> Allocator for ChainAllocator<A, F>
 where
-    A: Allocator + Default,
+    A: Allocator,
+    F: Fn() -> A,
 {
     #[inline]
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         // No need to track zero size allocators(like Global), they are already free to create and
         // all instances should be the same
         if core::mem::size_of::<A>() == 0 {
-            let zero_sized_allocator = A::default();
+            let zero_sized_allocator = (self.allocator_factory)();
             return zero_sized_allocator.allocate(layout);
         }
 
@@ -264,14 +260,17 @@ where
                 match next_allocator_node.allocate_and_track(layout) {
                     Ok(buf_ptr) => Ok(buf_ptr),
                     Err(_) => {
-                        let allocator_node = AllocatorNode::with_next(next_allocator_node_ptr);
+                        let allocator = (self.allocator_factory)();
+                        let allocator_node =
+                            AllocatorNode::with_next(allocator, next_allocator_node_ptr);
 
                         self.allocate_and_track_node(allocator_node, layout)
                     }
                 }
             }
             None => {
-                let allocator_node = AllocatorNode::new();
+                let allocator = (self.allocator_factory)();
+                let allocator_node = AllocatorNode::new(allocator);
 
                 self.allocate_and_track_node(allocator_node, layout)
             }
@@ -284,7 +283,7 @@ where
         // all instances should be the same
 
         if core::mem::size_of::<A>() == 0 {
-            let zero_sized_allocator = A::default();
+            let zero_sized_allocator = (self.allocator_factory)();
             return zero_sized_allocator.deallocate(ptr, layout);
         }
 
@@ -306,7 +305,7 @@ where
         );
 
         if core::mem::size_of::<A>() == 0 {
-            let zero_sized_allocator = A::default();
+            let zero_sized_allocator = (self.allocator_factory)();
             return zero_sized_allocator.grow(ptr, old_layout, new_layout);
         }
 
@@ -347,7 +346,7 @@ where
         );
 
         if core::mem::size_of::<A>() == 0 {
-            let zero_sized_allocator = A::default();
+            let zero_sized_allocator = (self.allocator_factory)();
             return zero_sized_allocator.grow_zeroed(ptr, old_layout, new_layout);
         }
 
@@ -388,7 +387,7 @@ where
         );
 
         if core::mem::size_of::<A>() == 0 {
-            let zero_sized_allocator = A::default();
+            let zero_sized_allocator = (self.allocator_factory)();
             return zero_sized_allocator.grow_zeroed(ptr, old_layout, new_layout);
         }
 
@@ -423,7 +422,7 @@ struct AllocationFooter<A> {
     allocator_node: NonNull<AllocatorNode<A>>,
 }
 
-impl<A: Allocator> ChainAllocator<A> {
+impl<A: Allocator, F> ChainAllocator<A, F> {
     fn allocate_and_track_node(
         &self,
         allocator_node: AllocatorNode<A>,
@@ -442,13 +441,17 @@ impl<A: Allocator> ChainAllocator<A> {
     }
 }
 
-impl<A> ChainAllocator<A> {
+impl<A, F> ChainAllocator<A, F>
+where
+    F: Fn() -> A,
+{
     /// Creates a empty [`ChainAllocator<A>`].
     #[inline]
     #[must_use]
-    pub const fn new() -> Self {
+    pub const fn new(allocator_factory: F) -> Self {
         Self {
             next_allocator: AllocatorRef::new(None),
+            allocator_factory,
             _owns: PhantomData,
         }
     }
@@ -480,9 +483,9 @@ mod test {
     #[test]
     fn should_create_a_new_allocator_when_needed() {
         // NOTE(gneubaner): each allocation has a pointer to the allocator used
-        let chain_allocator = ChainAllocator::<
-            LinearAllocator<{ 32 * size_of::<i32>() + size_of::<*const ()>() }>,
-        >::new();
+        let chain_allocator = ChainAllocator::new(|| {
+            LinearAllocator::<{ 32 * size_of::<i32>() + size_of::<*const ()>() }>::new()
+        });
 
         let mut vec1 = Vec::with_capacity_in(32, chain_allocator.by_ref());
         let mut vec2 = Vec::with_capacity_in(32, chain_allocator.by_ref());
@@ -497,7 +500,8 @@ mod test {
 
     #[test]
     fn should_reuse_the_same_allocator() {
-        let chain_allocator = ChainAllocator::<LinearAllocator<{ 1024 * size_of::<i32>() }>>::new();
+        let chain_allocator =
+            ChainAllocator::new(|| LinearAllocator::<{ 1024 * size_of::<i32>() }>::new());
 
         let mut vec1 = Vec::with_capacity_in(32, chain_allocator.by_ref());
         let mut vec2 = Vec::with_capacity_in(32, chain_allocator.by_ref());
@@ -543,8 +547,7 @@ mod test {
             }
         }
 
-        let chain_allocator = ChainAllocator::<StubAllocator>::new();
-
+        let chain_allocator = ChainAllocator::new(|| StubAllocator::default());
         let mut vec1: Vec<i32, _> = Vec::with_capacity_in(32, chain_allocator.by_ref());
         let mut vec2: Vec<i32, _> = Vec::with_capacity_in(32, chain_allocator.by_ref());
 
@@ -560,9 +563,9 @@ mod test {
     #[test]
     fn should_be_safe_to_send_across_threads() {
         // NOTE(gneubaner): each allocation has a pointer to the allocator used
-        let chain_allocator = ChainAllocator::<
-            LinearAllocator<{ 32 * size_of::<i32>() + size_of::<*const ()>() }>,
-        >::new();
+        let chain_allocator = ChainAllocator::new(|| {
+            LinearAllocator::<{ 32 * size_of::<i32>() + size_of::<*const ()>() }>::new()
+        });
 
         let mut vec1 = Vec::with_capacity_in(32, chain_allocator.by_ref());
         vec1.extend_from_slice(&[1, 2, 3, 4, 5]);
@@ -583,7 +586,7 @@ mod test {
     #[test]
     fn should_alloc_zeroed() {
         let chain_allocator =
-            ChainAllocator::<LinearAllocator<{ 32 + size_of::<*const ()>() }>>::new();
+            ChainAllocator::new(|| LinearAllocator::<{ 32 + size_of::<*const ()>() }>::new());
 
         let layout = Layout::array::<u8>(32).unwrap();
         let allocation = chain_allocator.allocate_zeroed(layout).unwrap();
@@ -599,7 +602,7 @@ mod test {
     #[test]
     fn should_grow_allocation() {
         let chain_allocator =
-            ChainAllocator::<LinearAllocator<{ 128 + size_of::<*const ()>() }>>::new();
+            ChainAllocator::new(|| LinearAllocator::<{ 128 + size_of::<*const ()>() }>::new());
 
         let old_layout = Layout::array::<u8>(32).unwrap();
         let old_allocation = chain_allocator.allocate(old_layout).unwrap();
@@ -621,7 +624,7 @@ mod test {
     #[test]
     fn should_grow_zeroed_allocation() {
         let chain_allocator =
-            ChainAllocator::<LinearAllocator<{ 128 + size_of::<*const ()>() }>>::new();
+            ChainAllocator::new(|| LinearAllocator::<{ 128 + size_of::<*const ()>() }>::new());
 
         let old_layout = Layout::array::<u8>(32).unwrap();
         let mut old_allocation = chain_allocator.allocate(old_layout).unwrap();
@@ -651,7 +654,7 @@ mod test {
     #[test]
     fn should_shrink_allocation() {
         let chain_allocator =
-            ChainAllocator::<LinearAllocator<{ 128 + size_of::<*const ()>() }>>::new();
+            ChainAllocator::new(|| LinearAllocator::<{ 128 + size_of::<*const ()>() }>::new());
 
         let old_layout = Layout::array::<u8>(64).unwrap();
         let mut old_allocation = chain_allocator.allocate(old_layout).unwrap();

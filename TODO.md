@@ -1,6 +1,6 @@
 -[X] Add README.md
 -[X] Upload crate
+-[X] ChainAllocator:
+    -[X] Use a closure to create allocators instead of relying on `Default`.
 -[ ] LinearAllocator:
     -[ ] Prefer to use a runtime size instead of a const size.
--[ ] ChainAllocator:
-    -[ ] Use a closure to create allocators instead of relying on `Default`.
