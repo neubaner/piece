@@ -1,10 +1,12 @@
-use alloc::boxed::Box;
-use core::{
-    alloc::{AllocError, Allocator, Layout},
-    cell::Cell,
-    marker::PhantomData,
-    ptr::NonNull,
-};
+use crate::alloc::{AllocError, Allocator};
+
+#[cfg(not(feature = "boxed"))]
+use alloc_crate::boxed::Box;
+
+#[cfg(feature = "boxed")]
+use crate::boxed::Box;
+
+use core::{alloc::Layout, cell::Cell, marker::PhantomData, ptr::NonNull};
 
 struct AllocatorNode<A> {
     allocator: A,
@@ -184,40 +186,40 @@ type AllocatorRef<A> = Cell<Option<NonNull<AllocatorNode<A>>>>;
 ///
 /// There's some overhead when using the [`ChainAllocator`]. Currently, every allocation has an
 /// extra pointer that refers to the allocator, to make deallocation possible. Also the allocators
-/// themselves are allocated using the [`Global`] allocator(or whatever allocator [`Box`] uses by
-/// default).
+/// themselves are allocated using the [`Box`].
 ///
 /// # Usage:
 /// ```
-/// #![feature(allocator_api)]
+/// #![cfg_attr(not(feature = "stable"), feature(allocator_api))]
+/// #[cfg(feature="vec")]
+/// {
+///     use core::mem::size_of;
 ///
-/// use core::{alloc::Allocator, mem::size_of};
-/// use std::vec::Vec;
+///     use piece::vec::Vec;
+///     use piece::LinearAllocator;
+///     use piece::ChainAllocator;
 ///
-/// use piece::LinearAllocator;
-/// use piece::ChainAllocator;
+///     // Make room for the allocator pointer
+///     let chain_allocator = ChainAllocator::new(|| {
+///         LinearAllocator::with_capacity(32 * size_of::<i32>() + size_of::<*const ()>())
+///     });
 ///
-/// // Make room for the allocator pointer
-/// let chain_allocator = ChainAllocator::new(|| {
-///     LinearAllocator::with_capacity(32 * size_of::<i32>() + size_of::<*const ()>())
-/// });
+///     // Create two vectors that fills the whole `LinearAllocator` so
+///     // each `Vec` creates a new allocator
+///     let mut vec1 = Vec::with_capacity_in(32, &chain_allocator);
+///     let mut vec2 = Vec::with_capacity_in(32, &chain_allocator);
 ///
-/// // Create two vectors that fills the whole `LinearAllocator` so
-/// // each `Vec` creates a new allocator
-/// let mut vec1 = Vec::with_capacity_in(32, chain_allocator.by_ref());
-/// let mut vec2 = Vec::with_capacity_in(32, chain_allocator.by_ref());
+///     vec1.extend_from_slice(&[1, 2, 3, 4, 5]);
+///     vec2.extend_from_slice(&[6, 7, 8, 9, 10]);
 ///
-/// vec1.extend_from_slice(&[1, 2, 3, 4, 5]);
-/// vec2.extend_from_slice(&[6, 7, 8, 9, 10]);
+///     assert_eq!(vec1, &[1, 2, 3, 4, 5]);
+///     assert_eq!(vec2, &[6, 7, 8, 9, 10]);
 ///
-/// assert_eq!(vec1, &[1, 2, 3, 4, 5]);
-/// assert_eq!(vec2, &[6, 7, 8, 9, 10]);
-///
-/// assert_eq!(2, chain_allocator.allocator_count());
+///     assert_eq!(2, chain_allocator.allocator_count());
+/// }
 /// ```
 ///
 /// [`LinearAllocator`]: crate::LinearAllocator
-/// [`Global`]: alloc::alloc::Global
 pub struct ChainAllocator<A, F> {
     next_allocator: AllocatorRef<A>,
     _owns: PhantomData<AllocatorNode<A>>,
@@ -431,11 +433,18 @@ impl<A: Allocator, F> ChainAllocator<A, F> {
     where
         A: Allocator,
     {
+        #[cfg(feature = "boxed")]
         let allocator_node = Box::try_new(allocator_node)?;
+
+        #[cfg(not(feature = "boxed"))]
+        let allocator_node = Box::new(allocator_node);
+
         let allocation = allocator_node.allocate_and_track(layout)?;
 
-        self.next_allocator
-            .set(Some(NonNull::from(Box::leak(allocator_node))));
+        // SAFETY: pointers from `Box` are always valid
+        self.next_allocator.set(Some(unsafe {
+            NonNull::new_unchecked(Box::into_raw(allocator_node))
+        }));
 
         Ok(allocation)
     }
@@ -473,115 +482,9 @@ where
 
 #[cfg(test)]
 mod test {
-    use core::mem::size_of;
-    use std::{alloc::Global, sync::Mutex};
-
-    use crate::linear_allocator::LinearAllocator;
-
     use super::*;
-
-    #[test]
-    fn should_create_a_new_allocator_when_needed() {
-        // NOTE(gneubaner): each allocation has a pointer to the allocator used
-        let chain_allocator = ChainAllocator::new(|| {
-            LinearAllocator::with_capacity(32 * size_of::<i32>() + size_of::<*const ()>())
-        });
-
-        let mut vec1 = Vec::with_capacity_in(32, chain_allocator.by_ref());
-        let mut vec2 = Vec::with_capacity_in(32, chain_allocator.by_ref());
-
-        vec1.extend_from_slice(&[1, 2, 3, 4, 5]);
-        vec2.extend_from_slice(&[6, 7, 8, 9, 10]);
-
-        assert_eq!(vec1, &[1, 2, 3, 4, 5]);
-        assert_eq!(vec2, &[6, 7, 8, 9, 10]);
-        assert_eq!(2, chain_allocator.allocator_count());
-    }
-
-    #[test]
-    fn should_reuse_the_same_allocator() {
-        let chain_allocator =
-            ChainAllocator::new(|| LinearAllocator::with_capacity(1024 * size_of::<i32>()));
-
-        let mut vec1 = Vec::with_capacity_in(32, chain_allocator.by_ref());
-        let mut vec2 = Vec::with_capacity_in(32, chain_allocator.by_ref());
-
-        vec1.extend_from_slice(&[1, 2, 3, 4, 5]);
-        vec2.extend_from_slice(&[6, 7, 8, 9, 10]);
-
-        assert_eq!(vec1, &[1, 2, 3, 4, 5]);
-        assert_eq!(vec2, &[6, 7, 8, 9, 10]);
-        assert_eq!(1, chain_allocator.allocator_count());
-    }
-
-    #[test]
-    fn should_track_every_allocation() {
-        struct StubAllocator {
-            vec: Mutex<Vec<NonNull<u8>>>,
-        }
-
-        unsafe impl Allocator for StubAllocator {
-            fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-                let global = Global;
-                let allocation = global.allocate(layout)?;
-
-                self.vec.lock().unwrap().push(allocation.cast());
-
-                Ok(allocation)
-            }
-
-            unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
-                let global = Global;
-
-                assert!(self.vec.lock().unwrap().contains(&ptr));
-
-                global.deallocate(ptr, layout);
-            }
-        }
-
-        impl Default for StubAllocator {
-            fn default() -> Self {
-                Self {
-                    vec: Mutex::new(Vec::new()),
-                }
-            }
-        }
-
-        let chain_allocator = ChainAllocator::new(|| StubAllocator::default());
-        let mut vec1: Vec<i32, _> = Vec::with_capacity_in(32, chain_allocator.by_ref());
-        let mut vec2: Vec<i32, _> = Vec::with_capacity_in(32, chain_allocator.by_ref());
-
-        vec1.extend_from_slice(&[1, 2, 3, 4, 5]);
-        vec2.extend_from_slice(&[6, 7, 8, 9, 10]);
-
-        assert_eq!(vec1, &[1, 2, 3, 4, 5]);
-        assert_eq!(vec2, &[6, 7, 8, 9, 10]);
-
-        assert_eq!(1, chain_allocator.allocator_count());
-    }
-
-    #[test]
-    fn should_be_safe_to_send_across_threads() {
-        // NOTE(gneubaner): each allocation has a pointer to the allocator used
-        let chain_allocator = ChainAllocator::new(|| {
-            LinearAllocator::with_capacity(32 * size_of::<i32>() + size_of::<*const ()>())
-        });
-
-        let mut vec1 = Vec::with_capacity_in(32, chain_allocator.by_ref());
-        vec1.extend_from_slice(&[1, 2, 3, 4, 5]);
-        assert_eq!(vec1, &[1, 2, 3, 4, 5]);
-        assert_eq!(chain_allocator.allocator_count(), 1);
-        drop(vec1);
-
-        let handle = std::thread::spawn(move || {
-            let mut vec2 = Vec::with_capacity_in(32, chain_allocator.by_ref());
-            vec2.extend_from_slice(&[6, 7, 8, 9, 10]);
-            assert_eq!(vec2, &[6, 7, 8, 9, 10]);
-            assert_eq!(chain_allocator.allocator_count(), 2);
-        });
-
-        let _ = handle.join();
-    }
+    use crate::linear_allocator::LinearAllocator;
+    use core::mem::size_of;
 
     #[test]
     fn should_alloc_zeroed() {

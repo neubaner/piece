@@ -1,8 +1,7 @@
-use core::{
-    alloc::{AllocError, Allocator, Layout},
-    ptr::NonNull,
-    sync::atomic::AtomicUsize,
-};
+use crate::alloc::{AllocError, Allocator};
+use alloc_crate::alloc;
+use core::{alloc::Layout, ptr::NonNull, sync::atomic::AtomicUsize};
+
 /// [`LinearAllocator`] is an allocator that keeps a fixed-sized buffer internally
 /// and use it to make allocations. Once the buffer is full, all next allocations fails.
 ///
@@ -11,23 +10,25 @@ use core::{
 ///
 /// # Usage:
 /// ```
-/// #![feature(allocator_api)]
+/// #![cfg_attr(not(feature = "stable"), feature(allocator_api))]
+/// #[cfg(feature = "vec")]
+/// {
+///     use core::mem::size_of;
 ///
-/// use core::{alloc::Allocator, mem::size_of};
-/// use std::vec::Vec;
+///     use piece::vec::Vec;
+///     use piece::LinearAllocator;
 ///
-/// use piece::LinearAllocator;
+///     let linear_allocator = LinearAllocator::with_capacity(64 * size_of::<i32>());
 ///
-/// let linear_allocator = LinearAllocator::with_capacity(64 * size_of::<i32>());
+///     let mut vec1 = Vec::with_capacity_in(32, &linear_allocator);
+///     let mut vec2 = Vec::with_capacity_in(32, &linear_allocator);
 ///
-/// let mut vec1 = Vec::with_capacity_in(32, linear_allocator.by_ref());
-/// let mut vec2 = Vec::with_capacity_in(32, linear_allocator.by_ref());
+///     vec1.extend_from_slice(&[1, 2, 3, 4, 5]);
+///     vec2.extend_from_slice(&[6, 7, 8, 9, 10]);
 ///
-/// vec1.extend_from_slice(&[1, 2, 3, 4, 5]);
-/// vec2.extend_from_slice(&[6, 7, 8, 9, 10]);
-///
-/// assert_eq!(vec1, &[1, 2, 3, 4, 5]);
-/// assert_eq!(vec2, &[6, 7, 8, 9, 10]);
+///     assert_eq!(vec1, &[1, 2, 3, 4, 5]);
+///     assert_eq!(vec2, &[6, 7, 8, 9, 10]);
+/// }
 /// ```
 pub struct LinearAllocator {
     buf: NonNull<u8>,
@@ -79,7 +80,7 @@ impl Drop for LinearAllocator {
     fn drop(&mut self) {
         // SAFETY: buf pointer was allocated with std::alloc::alloc with the same layout
         unsafe {
-            alloc::alloc::dealloc(
+            alloc::dealloc(
                 self.buf.as_ptr(),
                 Layout::array::<u8>(self.capacity).unwrap(),
             );
@@ -99,7 +100,7 @@ impl LinearAllocator {
     pub fn with_capacity(capacity: usize) -> Self {
         assert!(capacity > 0);
         // SAFETY: the assertion above ensures that layout size is greater than zero
-        let mem_ptr = unsafe { alloc::alloc::alloc(Layout::array::<u8>(capacity).unwrap()) };
+        let mem_ptr = unsafe { alloc::alloc(Layout::array::<u8>(capacity).unwrap()) };
         let mem_ptr = NonNull::new(mem_ptr).unwrap();
 
         Self {
@@ -108,70 +109,8 @@ impl LinearAllocator {
             capacity,
         }
     }
-}
 
-#[cfg(test)]
-mod test {
-    use core::mem::size_of;
-    use core::sync::atomic::Ordering;
-
-    use super::*;
-
-    #[test]
-    fn should_keep_allocation_for_the_lifetime() {
-        let linear_allocator = LinearAllocator::with_capacity(1024 * size_of::<i32>());
-
-        let mut vec1 = Vec::with_capacity_in(32, &linear_allocator);
-        let mut vec2 = Vec::with_capacity_in(32, &linear_allocator);
-        let mut zero_sized_vec = Vec::new_in(&linear_allocator);
-
-        vec1.extend_from_slice(&[1, 2, 3, 4, 5]);
-        vec2.extend_from_slice(&[6, 7, 8, 9, 10]);
-
-        zero_sized_vec.push(());
-        zero_sized_vec.push(());
-        zero_sized_vec.push(());
-
-        assert_eq!(
-            linear_allocator.len.load(Ordering::Relaxed),
-            64 * size_of::<i32>()
-        );
-        assert_eq!(vec1, &[1, 2, 3, 4, 5]);
-        assert_eq!(vec2, &[6, 7, 8, 9, 10]);
-        assert_eq!(zero_sized_vec.len(), 3);
-    }
-
-    #[test]
-    fn should_reuse_block() {
-        let linear_allocator = LinearAllocator::with_capacity(1024 * size_of::<i32>());
-        let vec1: Vec<i32, _> = Vec::with_capacity_in(512, &linear_allocator);
-
-        drop(vec1);
-
-        let vec2: Vec<i32, _> = Vec::with_capacity_in(512, &linear_allocator);
-        drop(vec2);
-
-        assert_eq!(
-            linear_allocator.len.load(Ordering::Relaxed),
-            1024 * size_of::<i32>()
-        );
-    }
-
-    #[test]
-    fn linear_allocator_should_work_on_a_multithread_environment() {
-        let linear_allocator = LinearAllocator::with_capacity(1024 * 1024 * 1024);
-
-        std::thread::scope(|s| {
-            let linear_allocator = &linear_allocator;
-            for i in 1..10000 {
-                s.spawn(move || {
-                    let mut vec: Vec<i32, _> = Vec::with_capacity_in(1024, linear_allocator);
-                    let slice: Vec<i32> = (i..i + 1024).collect();
-                    vec.extend(slice.iter());
-
-                    assert_eq!(vec, slice);
-                });
-            }
-        })
+    pub fn allocated_bytes(&self) -> usize {
+        self.len.load(core::sync::atomic::Ordering::Relaxed)
     }
 }

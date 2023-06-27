@@ -2,7 +2,7 @@
 name = "piece"
 description = "A collection of composable allocators"
 authors = ["Guilherme Neubaner <guilherme.neubaner@gmail.com>"]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 license = "MIT"
 
@@ -12,4 +12,16 @@ repository = "https://github.com/neubaner/piece"
 keywords = ["allocator", "allocators"]
 categories = ["memory-management", "no-std"]
 
+[package.metadata.docs.rs]
+features = ["all"]
+
+[features]
+default = []
+all = ["vec", "boxed"]
+stable = ["allocator-api2"]
+boxed = ["allocator-api2?/alloc"]
+vec = ["allocator-api2?/alloc"]
+
 [dependencies]
+allocator-api2 = { version = "0.2.15", default-features = false, optional = true }
+
