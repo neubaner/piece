@@ -126,3 +126,44 @@ fn should_be_safe_to_send_across_threads() {
 
     let _ = handle.join();
 }
+
+#[test]
+fn should_reuse_allocators_when_chain_allocator_resets() {
+    use piece::ResetAllocator;
+
+    let capacity = 64 + size_of::<*const ()>();
+
+    // This should create an allocator for each allocation
+    let mut chain_allocator = ChainAllocator::new(|| LinearAllocator::with_capacity(capacity));
+
+    {
+        let mut vec1: Vec<u8, _> = Vec::with_capacity_in(64, &chain_allocator);
+        let mut vec2: Vec<u8, _> = Vec::with_capacity_in(64, &chain_allocator);
+
+        for linear_allocator in chain_allocator.allocators() {
+            assert_eq!(capacity, linear_allocator.allocated_bytes());
+        }
+
+        vec1.extend(&[1; 64]);
+        vec2.extend(&[1; 64]);
+
+        assert_eq!(chain_allocator.allocator_count(), 2);
+    }
+
+    chain_allocator.reset();
+
+    // After we reset the allocator, the two allocators need to be reused
+    {
+        let mut vec1: Vec<u8, _> = Vec::with_capacity_in(64, &chain_allocator);
+        let mut vec2: Vec<u8, _> = Vec::with_capacity_in(64, &chain_allocator);
+
+        for linear_allocator in chain_allocator.allocators() {
+            assert_eq!(capacity, linear_allocator.allocated_bytes());
+        }
+
+        vec1.extend(&[1; 64]);
+        vec2.extend(&[1; 64]);
+
+        assert_eq!(chain_allocator.allocator_count(), 2);
+    }
+}

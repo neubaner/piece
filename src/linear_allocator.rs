@@ -1,4 +1,7 @@
-use crate::alloc::{AllocError, Allocator};
+use crate::{
+    alloc::{AllocError, Allocator},
+    reset_allocator::ResetAllocator,
+};
 use alloc_crate::alloc;
 use core::{alloc::Layout, ptr::NonNull, sync::atomic::AtomicUsize};
 
@@ -85,6 +88,12 @@ impl Drop for LinearAllocator {
                 Layout::array::<u8>(self.capacity).unwrap(),
             );
         }
+    }
+}
+
+impl ResetAllocator for LinearAllocator {
+    fn reset(&mut self) {
+        *self.len.get_mut() = 0;
     }
 }
 

@@ -12,8 +12,10 @@ pub mod boxed;
 pub mod vec;
 
 mod alloc;
-mod chain_allocator;
-mod linear_allocator;
+pub mod chain_allocator;
+pub mod linear_allocator;
+pub mod reset_allocator;
 
 pub use chain_allocator::ChainAllocator;
 pub use linear_allocator::LinearAllocator;
+pub use reset_allocator::ResetAllocator;
